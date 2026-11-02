@@ -1,0 +1,48 @@
+# docker compose up --build
+# Web UI: http://localhost:3000   API: http://localhost:8000/api/health
+# Set VR_SECRET_KEY (and DB_PASSWORD) in a .env file next to this file for anything beyond local testing.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: voicerep
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change-me-locally}
+      POSTGRES_DB: voicerep
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voicerep"]
+      interval: 5s
+      retries: 10
+
+  api:
+    build: ./backend
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      VR_ENV: ${VR_ENV:-development}
+      VR_DATABASE_URL: postgresql+psycopg://voicerep:${DB_PASSWORD:-change-me-locally}@db:5432/voicerep
+      VR_SECRET_KEY: ${VR_SECRET_KEY:-}
+      VR_ALLOWED_ORIGINS: ${VR_ALLOWED_ORIGINS:-http://localhost:3000}
+      VR_PUBLIC_APP_URL: ${VR_PUBLIC_APP_URL:-http://localhost:3000}
+      VR_COOKIE_SECURE: ${VR_COOKIE_SECURE:-false}
+      VR_LLM_URL: ${VR_LLM_URL:-}
+    volumes: [appdata:/app/data]    # models, uploads, recordings
+    ports: ["8000:8000"]
+
+  web:
+    build:
+      context: .
+      args: {BACKEND_URL: "http://api:8000"}
+    depends_on: [api]
+    ports: ["3000:3000"]
+
+  # Asterisk handles SIP. Mount your generated pjsip.conf / extensions.conf (Integrations -> Phone line).
+  asterisk:
+    image: andrius/asterisk:latest
+    profiles: ["phone"]
+    network_mode: host      # SIP/RTP need host networking; AudioSocket reaches the API on localhost:9092
+    volumes: ["./deploy/asterisk:/etc/asterisk/custom:ro"]
+
+volumes:
+  pgdata:
+  appdata:

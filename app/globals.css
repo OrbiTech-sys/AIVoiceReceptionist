@@ -1,26 +1,110 @@
 @import "tailwindcss";
+@source not "../backend";
+
+@custom-variant dark (&:where(.dark, .dark *));
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f2f4f7;
+  --border: #e4e7ec;
+  --border-strong: #d0d5dd;
+  --text: #101828;
+  --muted: #5d6879;
+  --subtle: #8a94a6;
+  --accent: #2f5bd3;
+  --accent-hover: #2549b0;
+  --accent-soft: #ebf0fd;
+  --accent-fg: #ffffff;
+  --success: #0f8a5f;
+  --success-soft: #e6f6ef;
+  --warning: #b25e09;
+  --warning-soft: #fdf3e5;
+  --danger: #c4320a;
+  --danger-soft: #fdeee9;
+  --ring: rgba(47, 91, 211, 0.35);
+  color-scheme: light;
+}
+
+.dark {
+  --bg: #0d1117;
+  --surface: #151a22;
+  --surface-2: #1c222c;
+  --border: #262d38;
+  --border-strong: #343c4a;
+  --text: #e6e9ef;
+  --muted: #9aa4b5;
+  --subtle: #6d7789;
+  --accent: #6b8ef5;
+  --accent-hover: #86a3f7;
+  --accent-soft: #1c2847;
+  --accent-fg: #0b1020;
+  --success: #3ccf8e;
+  --success-soft: #11291f;
+  --warning: #f0a54a;
+  --warning-soft: #2c2010;
+  --danger: #f2795a;
+  --danger-soft: #2e1712;
+  --ring: rgba(107, 142, 245, 0.4);
+  color-scheme: dark;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-subtle: var(--subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+@keyframes vr-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.vr-pulse { animation: vr-pulse 1.6s ease-in-out infinite; }
+
+@keyframes vr-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+.vr-fade-in { animation: vr-fade-in 160ms ease-out; }
+
+@media (prefers-reduced-motion: reduce) {
+  .vr-pulse, .vr-fade-in { animation: none; }
 }
