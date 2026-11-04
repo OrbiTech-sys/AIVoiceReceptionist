@@ -24,7 +24,7 @@ npm run dev                                           # http://localhost:3000
 
 Sign in with the seeded demo owner `demo@example.com` / `DemoOwner2026!` (demo business is labelled as demo data). Platform admin: `admin@example.com` / `PlatformAdmin2026!`. These are dev-only seed credentials; `seed.py` refuses to run when `VR_ENV=production`.
 
-**Install speech models:** sign in as the platform admin → *Platform admin* → *Download & verify* for Whisper (`base.en`, ~145 MB) and Kokoro (~325 MB + voices). Files are checksum-verified. Then open *AI Receptionist → Test call*.
+**Install speech models:** with Docker Compose the API downloads Whisper (`base.en`, ~145 MB) and Kokoro (~325 MB + voices) by itself in the background on first start (`VR_AUTO_INSTALL_MODELS`, on in `docker-compose.yml`); watch progress under *Platform admin*. Without Docker, either set `VR_AUTO_INSTALL_MODELS=true` in `backend/.env`, or sign in as the platform admin → *Platform admin* → *Download & verify*. Files are checksum-verified and kept in the `appdata` volume, so later restarts and redeploys don't download again. Then open *AI Receptionist → Test call*.
 
 ## Docker Compose
 
@@ -63,7 +63,7 @@ Argon2id passwords, server-side sessions in HttpOnly cookies, CSRF header on mut
 
 ## Tests
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q     # 41 tests
+cd backend && .venv/Scripts/python -m pytest -q     # 45 tests (the real-audio one is skipped until the speech models are installed)
 npx tsc --noEmit && npx eslint . && npm run build
 ```
 

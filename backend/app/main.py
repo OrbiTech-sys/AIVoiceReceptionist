@@ -16,6 +16,19 @@ from .telephony.audiosocket import AudioSocketAdapter
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def _auto_install_models() -> None:
+    """Runs in a worker thread: the check hashes any existing model files, which can take a few seconds."""
+    from .voice import models_manager
+
+    log = logging.getLogger("voicerep.models")
+    try:
+        started = models_manager.auto_install()
+        if started:
+            log.info("downloading speech models in the background: %s", ", ".join(started))
+    except Exception:
+        log.exception("automatic speech model install failed; install them from the Platform admin page")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
@@ -34,6 +47,8 @@ async def lifespan(app: FastAPI):
         from .voice import runtime
 
         asyncio.get_running_loop().run_in_executor(None, runtime.warmup)
+        if s.auto_install_models:
+            asyncio.get_running_loop().run_in_executor(None, _auto_install_models)
     yield
     stop.set()
     for t in tasks:

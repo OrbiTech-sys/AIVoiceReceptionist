@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     asr_model: str = "base.en"  # tiny.en | base.en | small.en
     asr_threads: int = 0  # 0 = number of CPU cores
     tts_threads: int = 4
+    # Download the default speech models (Whisper + Kokoro, ~0.5 GB) in the background at start-up when they
+    # are missing. Off by default so local development and tests never download anything; docker-compose
+    # turns it on for deployments.
+    auto_install_models: bool = False
 
     # Optional local LLM served by llama.cpp's llama-server (OpenAI-compatible HTTP API).
     llm_url: str = ""  # e.g. http://127.0.0.1:8081

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import logging
 import os
 import shutil
 import threading
@@ -17,7 +18,9 @@ from pathlib import Path
 
 from ..config import get_settings
 
-HF = "https://huggingface.co"
+log = logging.getLogger("voicerep.models")
+
+HF ="https://huggingface.co"
 KOKORO_REL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0"
 
 
@@ -245,6 +248,32 @@ def install(model_id: str, blocking: bool = False) -> None:
         run()
     else:
         threading.Thread(target=run, name=f"install-{model_id}", daemon=True).start()
+
+
+def auto_install() -> list[str]:
+    """Start background downloads for the default speech models that are missing.
+
+    Called at API start-up when VR_AUTO_INSTALL_MODELS is on, so a fresh deployment needs no admin
+    clicks. Idempotent: models that are already installed and verified are left alone, and a download
+    that is already running is not started twice. Models the server has too little RAM for are skipped
+    (the admin screen still explains why). Returns the ids whose download was started."""
+    wanted = [f"asr-{get_settings().asr_model}", "tts-kokoro"]
+    ram_gb = hardware()["ram_gb"]
+    started: list[str] = []
+    for mid in wanted:
+        spec = CATALOG.get(mid)
+        if spec is None:
+            log.warning("auto-install: unknown model %s (check VR_ASR_MODEL)", mid)
+            continue
+        if is_installed(mid):
+            continue
+        if ram_gb is not None and ram_gb < spec.min_ram_gb:
+            log.warning("auto-install: skipping %s, it needs %.1f GB RAM and this server has %.1f GB",
+                        mid, spec.min_ram_gb, ram_gb)
+            continue
+        install(mid)
+        started.append(mid)
+    return started
 
 
 def remove(model_id: str) -> None:

@@ -26,6 +26,8 @@ services:
       VR_PUBLIC_APP_URL: ${VR_PUBLIC_APP_URL:-http://localhost:3000}
       VR_COOKIE_SECURE: ${VR_COOKIE_SECURE:-false}
       VR_LLM_URL: ${VR_LLM_URL:-}
+      VR_ASR_MODEL: ${VR_ASR_MODEL:-base.en}                       # tiny.en | base.en | small.en
+      VR_AUTO_INSTALL_MODELS: ${VR_AUTO_INSTALL_MODELS:-true}      # download Whisper + Kokoro on first start
     volumes: [appdata:/app/data]    # models, uploads, recordings
     ports: ["8000:8000"]
 
