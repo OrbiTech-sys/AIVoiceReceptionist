@@ -37,8 +37,16 @@ jobs:
           SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          # A key pasted through a web form often picks up Windows line endings, stray spaces or blank lines,
+          # which OpenSSH rejects with "error in libcrypto". Normalise it, then check that it really loads.
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub 2>/dev/null; then
+            echo "::error::EC2_SSH_KEY is empty, damaged or protected by a passphrase. Paste the whole private key again."
+            exit 1
+          fi
+          # Fingerprint of the key (public information). It must match the key added to authorized_keys on the server.
+          ssh-keygen -lf ~/.ssh/deploy_key.pub
           # The server's SSH host PUBLIC key (ed25519), pinned so a look-alike server can't receive the key.
           # It is stored under an alias, so it does not matter whether EC2_HOST is an IP or a DNS name.
           # If the server is ever rebuilt its host key changes: update the line below to the new one.
