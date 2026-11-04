@@ -9,7 +9,7 @@ kokoro-onnx==0.6.1
 numpy==2.5.4
 onnxruntime==1.31.1
 phonenumbers==9.0.42
-psycopg==3.3.6
+psycopg[binary]==3.3.6
 py-vapid==1.9.6
 pydantic==2.14.1
 pydantic-settings==2.16.2
