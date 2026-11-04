@@ -70,6 +70,9 @@ jobs:
           git pull --ff-only origin main
           docker compose up -d --build
           docker image prune -f
+          # Every deploy leaves build-cache layers behind (about 0.5 GB each). Drop the ones not used for 3 days;
+          # layers reused by recent builds stay, so builds remain fast. Cleanup must never fail a deploy.
+          docker builder prune -f --filter until=72h || true
           docker compose ps
           REMOTE
 
