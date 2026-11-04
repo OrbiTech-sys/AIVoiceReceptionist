@@ -1,0 +1,79 @@
+name: Deploy to AWS
+
+# Deploys to the EC2 server over SSH whenever main changes (or when started by hand from the Actions tab).
+# The server pulls the new code itself and rebuilds with docker compose, exactly like a manual deploy.
+#
+# Repository secrets (Settings -> Secrets and variables -> Actions):
+#   EC2_HOST     public IP or DNS name of the server
+#   EC2_USER     SSH user on the server (for example ubuntu or ec2-user)
+#   EC2_SSH_KEY  PRIVATE key whose public half is in ~/.ssh/authorized_keys on the server
+#
+# The runner needs to reach port 22 of the server; GitHub's runner IPs change, so the security group
+# must allow SSH from the internet for this to work.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits instead of cancelling a deploy that is half way through.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  APP_DIR: AIVoiceReceptionist # folder in the SSH user's home directory on the server
+  HEALTH_URL: https://voice.theorbitechsolution.com/api/health
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Prepare SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # The server's SSH host PUBLIC key (ed25519), pinned so a look-alike server can't receive the key.
+          # It is stored under an alias, so it does not matter whether EC2_HOST is an IP or a DNS name.
+          # If the server is ever rebuilt its host key changes: update the line below to the new one.
+          echo 'deploy-target ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBFqrLH5dnXk4W8DqpgsAmWt9wJS0G6E9ATLv8KmFDqo' > ~/.ssh/known_hosts
+
+      - name: Pull and rebuild on the server
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER }}
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            -o HostKeyAlias=deploy-target \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=30 \
+            "$EC2_USER@$EC2_HOST" "APP_DIR=$APP_DIR bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$HOME/$APP_DIR"
+          git pull --ff-only origin main
+          docker compose up -d --build
+          docker image prune -f
+          docker compose ps
+          REMOTE
+
+      - name: Wait for the API to report healthy
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS --max-time 10 "$HEALTH_URL" | grep -q '"database":true'; then
+              echo "API is healthy"
+              exit 0
+            fi
+            echo "not healthy yet (attempt $i of 20)"
+            sleep 6
+          done
+          echo "Health check failed: $HEALTH_URL"
+          exit 1
