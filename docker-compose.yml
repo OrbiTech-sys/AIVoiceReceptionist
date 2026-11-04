@@ -38,6 +38,21 @@ services:
     depends_on: [api]
     ports: ["3000:3000"]
 
+  # Optional LLM that only classifies unusual phrasing (backend/app/voice/llm.py). OFF by default: it needs about
+  # 2 GB of RAM of its own on top of everything else. To use it:
+  #   1. Platform admin -> install "Qwen2.5-1.5B-Instruct" (downloads into the shared appdata volume)
+  #   2. in .env set VR_LLM_URL=http://llm:8081 and COMPOSE_PROFILES=llm (so every deploy keeps it running)
+  #   3. docker compose up -d
+  # Until the model file exists the container keeps restarting; that is expected and harmless.
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    profiles: ["llm"]
+    restart: unless-stopped
+    command: ["-m", "/app/data/models/llm/qwen2.5-1.5b-instruct-q4_k_m.gguf", "--host", "0.0.0.0", "--port", "8081",
+              "--ctx-size", "8192", "--parallel", "2"]    # 2 request slots x 4096 tokens each
+    volumes: ["appdata:/app/data:ro"]
+    mem_limit: 2g
+
   # Asterisk handles SIP. Mount your generated pjsip.conf / extensions.conf (Integrations -> Phone line).
   asterisk:
     image: andrius/asterisk:latest

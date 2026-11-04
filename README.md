@@ -32,8 +32,18 @@ Sign in with the seeded demo owner `demo@example.com` / `DemoOwner2026!` (demo b
 cp backend/.env.example .env   # set VR_SECRET_KEY, DB_PASSWORD
 docker compose up --build
 docker compose --profile phone up   # also start Asterisk
+docker compose --profile llm up -d  # also start the optional LLM (see "Optional LLM" below; needs ~2 GB more RAM)
 ```
 > The compose file and Dockerfiles were written but **not built or run** in the development environment (Docker wasn't installed there). Treat as unverified until you run it once.
+
+### Optional LLM (off by default)
+Calls work without it: the conversation engine is rule-based. The LLM (Qwen2.5-1.5B via llama.cpp) only *classifies* an unusual phrasing into a fixed set of intents; its output is validated and ignored if invalid. It needs about 2 GB of RAM on top of the rest, so enable it only on a server with room (roughly 8 GB total alongside the speech models; this estimate has not been measured).
+
+1. *Platform admin* → *Download & verify* on **Qwen2.5-1.5B-Instruct** (~1.1 GB).
+2. In `.env` (next to `docker-compose.yml`) set `VR_LLM_URL=http://llm:8081` and `COMPOSE_PROFILES=llm`, so every deploy keeps the `llm` service running.
+3. `docker compose up -d`. *AI Receptionist* shows the LLM as **Ready** once it answers `/health`; **Unreachable** means the URL is set but nothing answers (e.g. the model file isn't downloaded yet).
+
+To turn it off again, remove both lines from `.env`, run `docker compose rm -sf llm` (stops and removes that container), then `docker compose up -d`. The downloaded model can be removed on the *Platform admin* page.
 
 ## What works locally vs. what needs outside infrastructure
 
@@ -42,7 +52,7 @@ docker compose --profile phone up   # also start Asterisk
 | Accounts, tenants, roles, onboarding, settings | **Real phone calls**: a SIP provider (number + per-minute fees) and an Asterisk server |
 | Appointment calendar, booking, conflict prevention, reminders (server-side) | **Push alerts** to phones: HTTPS in production + user permission (iOS: install to Home Screen) |
 | Browser voice demo (mic → VAD → Whisper → dialog → Kokoro → speaker), typed fallback | **E-mail alerts**: your own SMTP server |
-| In-app notifications, sounds, custom sound upload | Optional LLM classifier: a `llama-server` you run yourself |
+| In-app notifications, sounds, custom sound upload | Optional LLM classifier: opt-in `llm` compose profile (llama.cpp, ~2 GB more RAM) |
 
 ### Cost transparency
 1. **Software / AI inference:** free. MIT/Apache models, no per-call fees.

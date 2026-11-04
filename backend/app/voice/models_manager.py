@@ -94,7 +94,8 @@ CATALOG: dict[str, ModelSpec] = {
         (FileSpec(f"{HF}/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
                   "llm/qwen2.5-1.5b-instruct-q4_k_m.gguf", 1117320736,
                   sha256="6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"),), 4.0, optional=True,
-        notes="Requires llama-server (MIT) running with this file and VR_LLM_URL set. Docker Compose includes it as an optional profile."),
+        notes="Off by default and not needed for calls. Needs llama-server (MIT) running with this file and VR_LLM_URL set, and about 2 GB more RAM. "
+              "docker-compose.yml has an opt-in 'llm' profile for it (steps in the README)."),
 }
 
 
