@@ -128,11 +128,15 @@ class TurnDetector:
         self.start_t, self.end_t = start_threshold, end_threshold
         fm = vad.frame_samples * 1000 / PIPELINE_SR
         self.min_speech_frames = max(1, int(min_speech_ms / fm))
-        self.end_silence_frames = max(1, int(end_silence_ms / fm))
+        self.set_end_silence_ms(end_silence_ms)
         self.max_frames = int(max_turn_s * 1000 / fm)
         self.preroll_frames = max(1, int(preroll_ms / fm))
         self._buf = np.zeros(0, dtype=np.float32)
         self._reset_turn()
+
+    def set_end_silence_ms(self, ms: int) -> None:
+        """How long a pause ends the caller's turn."""
+        self.end_silence_frames = max(1, int(ms * PIPELINE_SR / (self.vad.frame_samples * 1000)))
 
     def _reset_turn(self) -> None:
         self.in_speech = False
