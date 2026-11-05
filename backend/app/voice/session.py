@@ -190,6 +190,8 @@ class CallSession:
             self._recording.writeframes((np.clip(a16, -1, 1) * 32767).astype("<i2").tobytes())
         # While we talk, require stronger evidence of speech (helps with echo).
         self.turns.start_t = 0.85 if self.speaking else 0.6
+        if self.dialog:
+            self.turns.set_end_silence_ms(self.dialog.end_of_turn_ms)
         for ev in self.turns.feed(a16):
             if ev.kind == "speech_start":
                 self._last_activity = time.monotonic()
@@ -217,9 +219,9 @@ class CallSession:
         if audio16k.size < PIPELINE_SR * 0.25:
             return
         loop = asyncio.get_running_loop()
-        hints = ", ".join(s["name"] for s in self.dialog.snap.services[:8]) if self.dialog else ""
+        hint = self.dialog.asr_hint() if self.dialog else ""
         try:
-            tr = await loop.run_in_executor(None, self.asr.transcribe, audio16k, f"{self.dialog.snap.name}. {hints}.")
+            tr = await loop.run_in_executor(None, self.asr.transcribe, audio16k, hint)
         except Exception as exc:
             log.exception("ASR failed")
             await self._fail(f"ASR error: {type(exc).__name__}")

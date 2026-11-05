@@ -36,6 +36,8 @@ def has(t: str, *patterns: str) -> bool:
 
 
 # ------------------------------------------------------------------ intents
+END_CALL = r"\b(bye|goodbye|good bye|hang up|wrong number|end (of |the )*call)\b"
+
 INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("injection", (r"ignore (all |your |the )?(previous|prior|above) instructions", r"system prompt", r"developer mode",
                    r"\b(password|api key|secret key|database|sql)\b", r"other (business|clinic|compan)", r"\bjailbreak")),
@@ -46,7 +48,7 @@ INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
                     r"\bpush (it|my appointment) back", r"different (time|day) for my")),
     ("cancel", (r"\bcancel", r"\bcan't make (it|my appointment)", r"\bcannot make (it|my appointment)", r"\bcall off")),
     ("check_appointment", (r"when is my (appointment|booking)", r"do i have an? (appointment|booking)", r"confirm my appointment",
-                           r"what time is my")),
+                           r"what time is my", r"\babout (my|that|the) (appointment|booking)")),
     ("book", (r"\bbook", r"\bappointment\b", r"\bschedule\b", r"\bmake an? (appointment|reservation)", r"\breserv",
               r"\bcome in\b", r"\bsee (the |a )?(doctor|dentist|hygienist|stylist)", r"\bavailab", r"\bopenings\b",
               r"\bany opening\b", r"\bslot\b", r"\bget (a|an|my) [a-z ]{0,20}(cleaning|haircut|exam|checkup|check up|consult|viewing|massage|visit)")),
@@ -55,19 +57,24 @@ INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("price", (r"\b(price|cost|how much|fee|charge|rates?|expensive)\b", r"\$")),
     ("services", (r"what (services|do you (offer|do|provide))", r"\bservices\b", r"do you (offer|do|provide)", r"what kind of")),
     ("repeat", (r"\b(repeat|say (that|it) again|pardon|come again|didn't (catch|hear)|sorry what)\b", r"^what$")),
-    ("goodbye", (r"\b(bye|goodbye|good bye|that's all|that is all|that's it|nothing else|no thank you|no thanks|have a good)\b",)),
+    ("goodbye", (END_CALL, r"\b(that's all|that is all|that's it|nothing else|no thank you|no thanks|have a good)\b")),
     ("thanks", (r"\b(thank|thanks|appreciate)\b",)),
 ]
 
 AFFIRM = re.compile(r"^(yes|yeah|yep|yup|sure|correct|right|ok|okay|alright|all right|perfect|great|absolutely|definitely|"
-                    r"please|please do|go ahead|sounds good|that works|that's right|that is right|that's correct|"
-                    r"that would be great|exactly|fine|uh huh|mhm|of course|book it|do it|confirm)\b")
-DENY = re.compile(r"^(no|nope|nah|not really|incorrect|wrong|that's wrong|that is wrong|neither|none|not quite|actually no|"
-                  r"wait|hold on|cancel that|that's not right|negative)\b")
+                    r"please|please do|go ahead|go for it|sounds good|sounds great|that works|that's right|that is right|"
+                    r"that's correct|that's fine|that is fine|that's good|that would be great|that'd be great|exactly|fine|"
+                    r"uh huh|mhm|mm hmm|mmhmm|i think so|no problem|no worries|no that works|of course|book it|do it|confirm)\b")
+DENY = re.compile(r"^(no(?! problem\b| worries\b| that works\b)|nope|nah|not really|incorrect|wrong|that's wrong|that is wrong|"
+                  r"neither|none|not quite|actually no|wait|hold on|cancel that|that's not right|negative)\b")
+GREETING = re.compile(r"^(hello|hi|hey|good (morning|afternoon|evening))( there)?$")
+HEARING_CHECK = re.compile(r"^((hello|hi|hey) )?(are you there|can you hear me|do you hear me)$")
 
 HEALTH_EMERGENCY = (
     r"\bemergency\b", r"\b(severe|extreme|unbearable|excruciating|terrible) pain", r"bleeding (a lot|heavily|won't stop|that won't stop|non stop)",
-    r"can't stop (the )?bleeding", r"\bswelling\b.*\b(face|jaw|eye|throat|neck)\b", r"\b(can't|cannot|hard to|trouble|difficulty) (breathe|breathing|swallow)",
+    r"can't stop (the )?bleeding", r"\b(won't|wont|cannot|not) stop(ped)? bleeding", r"\bswelling\b.*\b(face|jaw|eye|throat|neck)\b",
+    r"\b(face|jaw|eye|throat|neck)\b.*\bswollen\b", r"\bswollen\b.*\b(face|jaw|eye|throat|neck)\b",
+    r"\b(can't|cannot|hard to|trouble|difficulty) (breathe|breathing|swallow)",
     r"\bchest pain", r"\bunconscious\b", r"\bpassed out\b", r"\bknocked out\b", r"\bbroken jaw\b", r"\boverdose",
     r"\bsuicid", r"\bkill myself\b", r"\bheart attack\b", r"\bstroke\b", r"\bseizure\b", r"\ballergic reaction\b",
     r"\bhigh fever\b", r"\bfacial swelling\b",
@@ -92,7 +99,8 @@ def detect_intents(text: str) -> list[str]:
 
 
 def is_emergency(text: str, health_business: bool) -> bool:
-    t = norm(text)
+    # "Do you do emergency appointments?" asks about a service. Anything else in the sentence still counts.
+    t = re.sub(r"\bdo you (do|see|take|have|offer|handle|accept|treat|provide) .*emergenc\w*", "", norm(text))
     return has(t, *(HEALTH_EMERGENCY if health_business else GENERAL_EMERGENCY))
 
 
@@ -107,6 +115,14 @@ def is_affirm(text: str) -> bool:
 
 def is_deny(text: str) -> bool:
     return bool(DENY.match(norm(text)))
+
+
+def is_greeting(text: str) -> bool:
+    return bool(GREETING.match(norm(text)))
+
+
+def is_hearing_check(text: str) -> bool:
+    return bool(HEARING_CHECK.match(norm(text)))
 
 
 # ------------------------------------------------------------------ dates & times
@@ -210,20 +226,22 @@ def parse_when(text: str, today: date) -> When:
         wd_match = re.search(r"\b(next|this|coming)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b", t)
         month_match = re.search(r"\b(" + "|".join(MONTHS + list(MONTH_ABBR)) + r")\.?\s+(\d{1,2}|\w+)(?:st|nd|rd|th)?\b", t)
         day_first = re.search(r"\b(?:the\s+)?(\d{1,2}(?:st|nd|rd|th)|" + "|".join(ORDINALS) + r")(?:\s+of\s+(" + "|".join(MONTHS + list(MONTH_ABBR)) + r"))?\b", t)
-        if month_match:
+        month_day = None
+        if month_match:  # "May I come in" also looks like a month until there's a day after it
             mname = month_match.group(1)
             month = MONTHS.index(mname) + 1 if mname in MONTHS else MONTH_ABBR.get(mname[:3])
             dtok = month_match.group(2)
             day = int(dtok) if dtok.isdigit() else ORDINALS.get(dtok) or NUM_WORDS.get(dtok)
             if month and day:
-                w.dates, w.explicit_date = _future_date(today, month, day), True
+                month_day = (month, day)
+        if month_day:
+            w.dates, w.explicit_date = _future_date(today, *month_day), True
         elif wd_match:
             target = WEEKDAYS.index(wd_match.group(2))
-            delta = (target - today.weekday()) % 7
-            if wd_match.group(1) == "next" and delta < 7 and has(t, r"next week"):
-                delta += 7
-            if delta == 0 and not has(t, r"\btoday\b"):
-                delta = 7 if wd_match.group(1) == "next" else 0
+            if wd_match.group(1) == "next" or has(t, r"\bnext week\b"):
+                delta = 7 - today.weekday() + target  # that weekday in the next calendar week
+            else:
+                delta = (target - today.weekday()) % 7
             w.dates, w.explicit_date = [today + timedelta(days=delta)], True
         elif has(t, r"\bnext week\b"):
             start = today + timedelta(days=7 - today.weekday())
@@ -296,7 +314,8 @@ DIGIT_WORDS = {"zero": "0", "oh": "0", "o": "0", "one": "1", "two": "2", "to": "
                "four": "4", "for": "4", "five": "5", "six": "6", "seven": "7", "eight": "8", "ate": "8", "nine": "9"}
 
 
-def extract_phone(text: str) -> str | None:
+def phone_digits(text: str) -> str:
+    """Every digit in what the caller said, in order, including spoken ones like "double three"."""
     t = norm(text).replace("-", " ")
     tokens = t.split()
     digits = ""
@@ -316,6 +335,14 @@ def extract_phone(text: str) -> str | None:
         elif tok in DIGIT_WORDS and (digits or tok not in ("to", "too", "for", "o", "ate")):
             digits += DIGIT_WORDS[tok]
         i += 1
+    return digits
+
+
+def phone_from_digits(digits: str) -> str | None:
+    """A complete phone number, or None if there aren't enough digits yet. A number starting with 0 is in some
+    country's local format: it stays as spoken, because adding a country code would be a guess."""
+    if digits.startswith("0"):
+        return digits if 10 <= len(digits) <= 15 else None
     if len(digits) == 11 and digits.startswith("1"):
         return "+" + digits
     if len(digits) == 10:
@@ -325,9 +352,8 @@ def extract_phone(text: str) -> str | None:
     return None
 
 
-def count_digits(text: str) -> int:
-    t = norm(text)
-    return sum(c.isdigit() for c in t) + sum(1 for tok in t.split() if tok in DIGIT_WORDS and tok not in ("to", "too", "for", "o", "ate"))
+def extract_phone(text: str) -> str | None:
+    return phone_from_digits(phone_digits(text))
 
 
 NAME_PREFIX = re.compile(r"\b(?:my name is|my name's|name is|this is|it's|it is|i am|i'm|call me|the name is|under)\s+(.+)", re.I)
@@ -358,7 +384,8 @@ def extract_name(text: str, expecting: bool = False) -> str | None:
 # ------------------------------------------------------------------ fuzzy matching (services, KB)
 STOP = set("a an the i to for of and or is are do does you your my me we our can could would like want need please "
            "get have has be on in at with about what how when where which who this that it its im i'm just some any "
-           "there here hi hello yes no so um uh".split())
+           "there here hi hello yes no so um uh see know tell think mean say said go going got let make take "
+           "ok okay yeah".split())
 
 
 def tokens(text: str) -> set[str]:

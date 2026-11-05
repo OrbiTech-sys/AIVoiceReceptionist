@@ -192,9 +192,10 @@ class ReceptionistTools:
     def book(self, service_id: str, slot: SlotOption, name: str, phone: str | None, notes: str = "") -> ToolResult:
         if not name or len(name) > 120:
             return ToolResult(False, "invalid name", "invalid_input")
-        e164 = normalize_phone(phone) if phone else None
+        # A number in another country's local format can't be filed, but it must not cost the caller their appointment.
+        e164 = normalize_phone(phone) if phone and not phone.startswith("0") else None
         if phone and not e164:
-            return ToolResult(False, "invalid phone", "invalid_input")
+            notes = f"{notes} Number given by the caller: {phone}".strip()
         with SessionLocal() as db:
             t = self._tenant(db)
             try:

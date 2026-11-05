@@ -39,6 +39,8 @@ class Booking:
     appointment: ApptInfo | None = None  # for reschedule / cancel
     candidates: list[ApptInfo] = field(default_factory=list)
     reason: str = ""
+    reason_final: bool = False  # the reason is already known, so don't ask the caller for one
+    partial_digits: str = ""  # a phone number the caller is giving in pieces
 
 
 class Receptionist:
@@ -127,6 +129,24 @@ class Receptionist:
         return "We're open " + "; ".join(parts) + "."
 
     # ------------------------------------------------------------------ public API
+    @property
+    def end_of_turn_ms(self) -> int:
+        """How long a pause ends the caller's turn. People pause while giving a number or a name."""
+        if self.state in ("book_phone", "lookup_phone", "msg_phone"):
+            return 1500
+        if self.state in ("book_name", "msg_name", "msg_reason"):
+            return 1000
+        return 650
+
+    def asr_hint(self) -> str:
+        """What the caller is probably about to say, to help speech recognition."""
+        if self.state in ("book_phone", "lookup_phone", "msg_phone"):
+            return "Phone number, spoken digit by digit."
+        if self.state in ("book_name", "msg_name"):
+            return "The caller's full name."
+        services = ", ".join(s["name"] for s in self.snap.services[:8])
+        return f"{self.snap.name}. {services}."
+
     def greeting(self) -> Reply:
         s = self.snap
         greet = s.greeting.strip() or f"Thank you for calling {s.name}. How can I help you today?"
@@ -165,20 +185,33 @@ class Receptionist:
         if self.snap.health and nlu.wants_medical_advice(text) and self.state in ("idle",):
             return self._say("I'm not able to give medical advice, but I can book you an appointment or ask a member "
                              "of our team to call you back. Which would you prefer?")
+        hello = "Hi!" if nlu.is_greeting(text) else "Yes, I can hear you." if nlu.is_hearing_check(text) else ""
+        if hello:
+            return self._say(f"{hello} How can I help you today?" if self.state == "idle" else f"{hello} {self._reprompt()}")
         if "repeat" in intents and self.last_reply:
             return Reply(self.last_reply, state=self.state)
         if "human" in intents and self.state not in ("msg_name", "msg_phone", "msg_reason"):
             return self._human()
         if "goodbye" in intents and not ({"book", "reschedule", "cancel"} & set(intents)):
-            if self.state in ("idle", "anything_else") or nlu.has(nlu.norm(text), r"\b(bye|goodbye|good bye)\b"):
+            if self.state in ("idle", "anything_else") or nlu.has(nlu.norm(text), nlu.END_CALL):
                 return self._goodbye()
+        if self.flow == "book":
+            # The caller can change their mind in the middle of a booking.
+            if "check_appointment" in intents:
+                return self._start_lookup("check")
+            if "reschedule" in intents:
+                return self._start_lookup("reschedule")
+            if "cancel" in intents and nlu.has(nlu.norm(text), r"\bmy (appointment|booking)\b"):
+                return self._start_lookup("cancel")
 
         # 2. State-specific handling
         handler = getattr(self, f"_st_{self.state}", None)
         if handler is not None and self.state != "idle":
+            misses = self.misunderstood
             reply = handler(text, intents, confidence)
             if reply is not None:
-                self.misunderstood = 0
+                if self.misunderstood == misses:  # otherwise the handler is asking again, which still counts
+                    self.misunderstood = 0
                 return reply
             # Side questions mid-flow: answer and return to the pending question.
             side = self._answer_info(text, intents)
@@ -329,7 +362,7 @@ class Receptionist:
     def _st_book_service(self, text, intents, conf):
         sid = nlu.match_service(text, [(s["id"], s["name"]) for s in self.snap.services])
         if not sid:
-            return None if intents else self._say(f"Sorry, I didn't catch which service. {self._service_menu()}")
+            return None if intents else self._retry(f"Sorry, I didn't catch which service. {self._service_menu()}")
         self.b.service_id = sid
         when = nlu.parse_when(text, self.today)
         if not when.empty:
@@ -343,6 +376,8 @@ class Receptionist:
         if when.empty:
             if nlu.is_deny(text) or nlu.has(nlu.norm(text), r"\b(no preference|not really)\b"):
                 when.flexible = True
+            elif nlu.is_affirm(text):
+                return self._say("Great, what day and time would you like?")
             else:
                 return None
         self.b.when = when
@@ -432,7 +467,7 @@ class Receptionist:
     def _st_book_name(self, text, intents, conf):
         name = nlu.extract_name(text, expecting=True)
         if not name:
-            return None if intents else self._say("Sorry, I didn't catch your name. Could you say it again?")
+            return None if intents else self._retry("Sorry, I didn't catch your name. Could you say it again?")
         self.b.name = name
         self.caller_name = name
         if conf < 0.55:
@@ -466,7 +501,30 @@ class Receptionist:
         d = e164[2:] if e164.startswith("+1") and len(e164) == 12 else e164.lstrip("+")
         if len(d) == 10:
             return f"{self._spell(d[:3])}, {self._spell(d[3:6])}, {self._spell(d[6:])}"
+        if len(d) == 11:
+            return f"{self._spell(d[:4])}, {self._spell(d[4:7])}, {self._spell(d[7:])}"
         return self._spell(d)
+
+    def _take_phone(self, text: str) -> Reply | None:
+        """Handle one turn of a caller giving their number. People often say it in pieces and pause between groups of
+        digits, so it's collected across turns. Returns None if this turn wasn't about the number."""
+        said = nlu.phone_digits(text)
+        digits = said if nlu.phone_from_digits(said) else self.b.partial_digits + said
+        phone = nlu.phone_from_digits(digits)
+        if phone:
+            self.b.partial_digits = ""
+            self.b.phone = phone
+            self.state = "book_phone_confirm"
+            return self._say(f"I have {self._phone_readback(phone)}. Is that correct?")
+        if len(digits) > 15:
+            self.b.partial_digits = ""
+            return self._retry("Sorry, I didn't get that number. Could you say it again, slowly?")
+        if digits:
+            self.b.partial_digits = digits
+            return self._say("Okay, go on.")
+        if nlu.has(nlu.norm(text), r"\b(number|phone)\b"):
+            return self._say("Sure, go ahead.")
+        return None
 
     def _st_book_phone_callerid(self, text, intents, conf):
         if nlu.is_affirm(text):
@@ -483,17 +541,13 @@ class Receptionist:
         return None
 
     def _st_book_phone(self, text, intents, conf):
-        phone = nlu.extract_phone(text)
-        if not phone and nlu.NAME_PREFIX.search(text) and (name := nlu.extract_name(text)):
+        reply = self._take_phone(text)
+        if reply is not None:
+            return reply
+        if nlu.NAME_PREFIX.search(text) and (name := nlu.extract_name(text)):
             self.b.name = self.caller_name = name
             return self._say(f"Thanks, {name}. And what's the best phone number to reach you?")
-        if not phone:
-            if nlu.count_digits(text) >= 3:
-                return self._say("Sorry, I didn't get the full number. Could you say it again, including the area code?")
-            return None
-        self.b.phone = phone
-        self.state = "book_phone_confirm"
-        return self._say(f"I have {self._phone_readback(phone)}. Is that correct?")
+        return None
 
     def _st_book_phone_confirm(self, text, intents, conf):
         if nlu.is_affirm(text):
@@ -589,14 +643,7 @@ class Receptionist:
         return self._say("I can help with that. What's the phone number the appointment was booked under?")
 
     def _st_lookup_phone(self, text, intents, conf):
-        phone = nlu.extract_phone(text)
-        if not phone:
-            if nlu.count_digits(text) >= 3:
-                return self._say("Sorry, I didn't get the full number. Could you say it again, including the area code?")
-            return None
-        self.b.phone = phone
-        self.state = "book_phone_confirm"
-        return self._say(f"I have {self._phone_readback(phone)}. Is that correct?")
+        return self._take_phone(text)
 
     def _lookup_by_phone(self) -> Reply:
         appts = self.tools.find_appointments(self.b.phone)
@@ -701,9 +748,12 @@ class Receptionist:
         return None
 
     # ------------------------------------------------------------------ messages, humans, emergencies
+    def _can_transfer(self) -> bool:
+        return bool(self.channel == "phone" and self.snap.transfer_number and self.is_open_now())
+
     def _human(self) -> Reply:
         self.actions.append("asked for a person")
-        if self.channel == "phone" and self.snap.transfer_number and self.is_open_now():
+        if self._can_transfer():
             self.wants_transfer = True
             self.outcome_flags.add("transferred")
             self.ended = True
@@ -733,28 +783,24 @@ class Receptionist:
     def _st_msg_name(self, text, intents, conf):
         name = nlu.extract_name(text, expecting=True)
         if not name:
-            return None if intents else self._say("Sorry, could you tell me your name again?")
+            return None if intents else self._retry("Sorry, could you tell me your name again?")
         self.b.name = self.caller_name = name
         return self._msg_ask_phone()
 
     def _msg_ask_phone(self) -> Reply:
+        first_name = self.b.name.split()[0]
         if self.caller_number:
             self.b.phone = self.caller_number
+            if self.b.reason_final:
+                return self._finish_message(f"Thanks, {first_name}. Our team will call you back at the number you're calling from.")
             self.state = "msg_reason"
-            return self._say(f"Thanks, {self.b.name.split()[0]}. We'll call you back at the number you're calling from. "
-                             "Briefly, what is it regarding?")
+            return self._say(f"Thanks, {first_name}. We'll call you back at the number you're calling from. "
+                             "In a few words, what should we call you about?")
         self.state = "msg_phone"
-        return self._say(f"Thanks, {self.b.name.split()[0]}. What's the best number to reach you?")
+        return self._say(f"Thanks, {first_name}. What's the best number to reach you?")
 
     def _st_msg_phone(self, text, intents, conf):
-        phone = nlu.extract_phone(text)
-        if not phone:
-            if nlu.count_digits(text) >= 3:
-                return self._say("Sorry, I didn't get the full number. Could you say it again, including the area code?")
-            return None
-        self.b.phone = phone
-        self.state = "book_phone_confirm"
-        return self._say(f"I have {self._phone_readback(phone)}. Is that correct?")
+        return self._take_phone(text)
 
     def _st_msg_finish(self) -> Reply:
         if self.b.reason == "Urgent concern":
@@ -762,18 +808,22 @@ class Receptionist:
             self.state = "anything_else"
             return self._say("Thank you. Our team will call you back as soon as possible. If things get worse, please "
                              "call your local emergency number.")
+        if self.b.reason_final:
+            return self._finish_message("Thank you. Our team will call you back.")
         self.state = "msg_reason"
-        return self._say("Got it. Briefly, what is it regarding?")
+        return self._say("Got it. In a few words, what should we call you about?")
 
     def _st_msg_reason(self, text, intents, conf):
-        reason = text.strip()[:300]
-        self.tools.request_callback(self.b.name or "", self.b.phone, f"Callback request: {reason}")
+        self.b.reason = f"Callback request: {text.strip()[:300]}"
+        return self._finish_message("Thank you. I've passed your message to our team and someone will call you back.")
+
+    def _finish_message(self, spoken: str) -> Reply:
+        self.tools.request_callback(self.b.name or "", self.b.phone, self.b.reason)
         self.actions.append("requested a callback")
         self.outcome_flags.add("callback")
         self.state = "anything_else"
         self.flow = ""
-        return self._say("Thank you. I've passed your message to our team and someone will call you back. "
-                         "Is there anything else I can help with?")
+        return self._say(f"{spoken} Is there anything else I can help with?")
 
     def _st_anything_else(self, text, intents, conf):
         if nlu.is_deny(text) and not intents:
@@ -820,15 +870,59 @@ class Receptionist:
             "reschedule_confirm": "Shall I make that change?",
             "msg_name": "May I have your name?",
             "msg_phone": "What's the best number to reach you?",
-            "msg_reason": "What is it regarding?",
+            "msg_reason": "What should we call you about?",
         }.get(self.state, "Is there anything else I can help with?")
+
+    def _retry(self, text: str) -> Reply:
+        """Ask again. This counts as a misunderstanding, so a caller can't get stuck on one question forever."""
+        self.misunderstood += 1
+        return self._escalate() if self.misunderstood >= 3 else self._say(text)
+
+    def _escalate(self) -> Reply:
+        """Repeated misunderstandings: hand over to a person, and be plain about what has and hasn't happened."""
+        self.misunderstood = 0
+        if self.flow == "message":
+            return self._give_up()
+        if self._can_transfer():
+            return self._human()
+        spoken = "I'm sorry, I'm having trouble understanding. "
+        spoken += "I haven't booked anything yet, so I'll ask our team to call you back." if self.flow == "book" else "I'll ask our team to call you back."
+        reason = self._unfinished_request()
+        name, phone = self.b.name or self.caller_name, self.b.phone or self.caller_number
+        self.actions.append("could not be understood")
+        self.flow = "message"
+        self.b = Booking(reason=reason, reason_final=True, name=name, phone=phone)
+        if not name:
+            self.state = "msg_name"
+            return self._say(f"{spoken} May I have your name?")
+        if not phone:
+            self.state = "msg_phone"
+            return self._say(f"{spoken} What's the best number to reach you?")
+        return self._finish_message(spoken)
+
+    def _unfinished_request(self) -> str:
+        """What the caller wanted, for the team calling them back."""
+        if self.flow == "book":
+            service = self._service(self.b.service_id)
+            wanted = f"a {service['name'].lower()}" if service else "an appointment"
+            when = f" {self._when_text(self.b.slot.start)}" if self.b.slot else ""
+            return f"Wanted to book {wanted}{when}, but the receptionist couldn't understand them. Nothing was booked."
+        if self.flow in ("reschedule", "cancel", "check"):
+            return f"Wanted help with an appointment ({self.flow}), but the receptionist couldn't understand them."
+        return "The receptionist couldn't understand them."
+
+    def _give_up(self) -> Reply:
+        """Even taking a message isn't working. End the call politely instead of asking the same thing forever."""
+        self._callback_silent(self.b.reason or "The receptionist couldn't understand them.")
+        self.ended = True
+        self.state = "ended"
+        return self._say("I'm sorry, I'm having trouble understanding you. Please call back any time, or try from a "
+                         "quieter place. Goodbye!", end_call=True)
 
     def _unclear(self) -> Reply:
         self.misunderstood += 1
         if self.misunderstood >= 3:
-            self.misunderstood = 0
-            if self.state not in ("msg_name", "msg_phone", "msg_reason"):
-                return self._human()
+            return self._escalate()
         if self.state in ("idle", "anything_else"):
             if self.misunderstood == 1:
                 return self._say("Sorry, I didn't quite catch that. I can help with appointments, our hours, location, "
