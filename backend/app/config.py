@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     audiosocket_enabled: bool = True
     audiosocket_host: str = "0.0.0.0"
     audiosocket_port: int = 9092
+    # Shared with Asterisk, which sends it on every call. Calls are refused until this is set.
+    asterisk_token: str = ""
+    # Calls beyond this are forwarded or refused rather than answered too slowly. 4 is a cautious guess for now:
+    # each call needs speech recognition and voice generation, so set this from a load test on the real server.
+    max_concurrent_calls: int = 4
+    # How long a restart waits for calls in progress to finish.
+    drain_seconds: float = 120.0
 
     # Optional e-mail delivery (SMTP). Leave empty to disable e-mail reminders.
     smtp_host: str = ""

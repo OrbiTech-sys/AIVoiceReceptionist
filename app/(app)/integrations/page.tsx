@@ -2,7 +2,7 @@
 
 import { BellRing, Cpu, Mail, PhoneCall } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
-import { PhoneSetup } from "@/components/phone-setup";
+import { PHONE_STATUS_LABEL, PhoneSetup } from "@/components/phone-setup";
 import { Badge, Button, Card, PageHeader, statusTone } from "@/components/ui";
 import { useApi } from "@/lib/hooks";
 import { currentSubscription, pushSupported } from "@/lib/push";
@@ -48,15 +48,15 @@ export default function IntegrationsPage() {
     read().then(setPush);
   }, []);
   const telStatus = tel.data?.status ?? "not_configured";
-  const telLabel = { not_configured: "Not configured", pending_validation: "Waiting for test call", connected: "Connected", error: "Error" }[telStatus] ?? telStatus;
+  const telLabel = PHONE_STATUS_LABEL[telStatus] ?? telStatus;
 
   return (
     <>
       <PageHeader title="Integrations" description="An integration only shows as connected after it has been validated." />
       <div className="space-y-4">
-        <IntegrationCard icon={<PhoneCall className="size-5" />} name="Phone line (SIP via Asterisk)" status={telLabel} tone={statusTone(telStatus)}
-          enables="Answer real phone calls. Requires a SIP provider (paid phone number + per-minute charges) and an Asterisk server."
-          action={<Button size="sm" variant={phoneOpen ? "secondary" : "primary"} onClick={() => setPhoneOpen(!phoneOpen)}>{phoneOpen ? "Close" : telStatus === "not_configured" ? "Configure" : "Manage"}</Button>}>
+        <IntegrationCard icon={<PhoneCall className="size-5" />} name="Phone line" status={telLabel} tone={statusTone(telStatus)}
+          enables="Answer real phone calls on your receptionist's own number. You can also forward your existing number to it."
+          action={<Button size="sm" variant={phoneOpen ? "secondary" : "primary"} onClick={() => setPhoneOpen(!phoneOpen)}>{phoneOpen ? "Close" : "Details"}</Button>}>
           {tel.data?.last_error && !phoneOpen && <p className="text-[13px] text-warning">{tel.data.last_error}</p>}
           {phoneOpen && <PhoneSetup />}
         </IntegrationCard>

@@ -14,6 +14,7 @@ os.environ.update({
     "VR_SECRET_KEY": "test-secret-key-for-unit-tests-only",
     "VR_RUN_WORKERS": "false",
     "VR_AUDIOSOCKET_ENABLED": "false",
+    "VR_ASTERISK_TOKEN": "test-asterisk-token",
 })
 
 import pytest  # noqa: E402

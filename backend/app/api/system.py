@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import AuthContext, require_platform_admin, require_tenant
 from ..errors import AppError, NotFound
-from ..models import Appointment, Call, Membership, Tenant
+from ..models import Appointment, Call, Membership, TelephonyIntegration, Tenant
 from ..services.audit import audit
 from ..services.delivery import email_configured
 from ..telephony import base
@@ -73,9 +73,13 @@ async def admin_warmup(_ctx: AuthContext = Depends(require_platform_admin)):
 @router.get("/admin/tenants")
 def admin_tenants(_ctx: AuthContext = Depends(require_platform_admin), db: Session = Depends(get_db)):
     rows = db.scalars(select(Tenant).order_by(Tenant.created_at.desc()).limit(200)).all()
+    lines = {i.tenant_id: i for i in db.scalars(select(TelephonyIntegration))}
     out = []
     for t in rows:
+        line = lines.get(t.id)
         out.append({
+            "phone_number": line.did_number if line else None,
+            "phone_status": line.status if line else "not_configured",
             "id": t.id, "name": t.name, "business_type": t.business_type, "created_at": t.created_at.isoformat(),
             "onboarding_completed": t.onboarding_completed, "is_demo": t.is_demo,
             "members": db.scalar(select(func.count()).select_from(Membership).where(Membership.tenant_id == t.id)),

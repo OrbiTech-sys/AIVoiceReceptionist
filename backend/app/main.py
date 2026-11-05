@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     for t in tasks:
         t.cancel()
     if adapter:
-        await adapter.stop()
+        await adapter.stop(s.drain_seconds)
 
 
 def create_app() -> FastAPI:
