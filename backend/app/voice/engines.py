@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol
 
 import numpy as np
+import soxr
 
 log = logging.getLogger("voicerep.voice")
 
@@ -20,12 +21,27 @@ PIPELINE_SR = 16000  # VAD + ASR sample rate
 
 
 def resample(audio: np.ndarray, src_sr: int, dst_sr: int) -> np.ndarray:
+    """Resample one complete clip. Frequencies the new rate can't carry are filtered out; without that they
+    would fold back into the audible range as distortion."""
+    audio = audio.astype(np.float32, copy=False)
     if src_sr == dst_sr or audio.size == 0:
-        return audio.astype(np.float32, copy=False)
-    n = int(round(audio.size * dst_sr / src_sr))
-    x_old = np.linspace(0.0, 1.0, audio.size, endpoint=False)
-    x_new = np.linspace(0.0, 1.0, n, endpoint=False)
-    return np.interp(x_new, x_old, audio).astype(np.float32)
+        return audio
+    return soxr.resample(audio, src_sr, dst_sr, quality="HQ")
+
+
+class StreamResampler:
+    """Resample live audio that arrives in small frames. The filter's state carries over between frames, so
+    frame boundaries stay inaudible. Output runs about 30 ms behind the input, so early frames may come back empty."""
+
+    def __init__(self, src_sr: int, dst_sr: int):
+        self.src_sr = src_sr
+        self._stream = None if src_sr == dst_sr else soxr.ResampleStream(src_sr, dst_sr, 1, dtype="float32", quality="HQ")
+
+    def process(self, audio: np.ndarray) -> np.ndarray:
+        audio = audio.astype(np.float32, copy=False)
+        if self._stream is None or audio.size == 0:
+            return audio
+        return self._stream.resample_chunk(audio)
 
 
 def pcm16_to_float(b: bytes) -> np.ndarray:

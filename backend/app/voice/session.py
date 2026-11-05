@@ -21,7 +21,7 @@ from ..security import normalize_phone
 from ..services.notifications import notify
 from . import runtime
 from .dialog import Receptionist, Reply
-from .engines import PIPELINE_SR, TurnDetector, resample, split_sentences
+from .engines import PIPELINE_SR, StreamResampler, TurnDetector, split_sentences
 from .llm import LocalLLM
 from .tools import ReceptionistTools, load_snapshot
 
@@ -58,6 +58,8 @@ class CallSession:
         self._closed = False
         self._failed: str | None = None
         self._watchdog: asyncio.Task | None = None
+        self._greeting: asyncio.Task | None = None
+        self._resampler = StreamResampler(input_sr, PIPELINE_SR)
         self._recording: wave.Wave_write | None = None
         self._recording_name: str | None = None
         self.end_requested = asyncio.Event()
@@ -84,8 +86,16 @@ class CallSession:
             "type": "ready", "call_id": self.call_id, "asr": self.asr is not None, "tts": self.tts is not None,
             "vad": vad_kind, "receptionist": snap.receptionist_name, "business": snap.name,
         })
-        await self.say(self.dialog.greeting())
+        # Not awaited: the caller must be heard, and able to interrupt, while the greeting is being synthesized.
+        self._greeting = asyncio.create_task(self._greet(self.dialog.greeting()))
         self._watchdog = asyncio.create_task(self._silence_watchdog())
+
+    async def _greet(self, greeting: Reply) -> None:
+        try:
+            await self.say(greeting)
+        except Exception as exc:
+            log.exception("greeting failed")
+            await self._fail(f"TTS error: {type(exc).__name__}")
 
     def _create_call(self) -> str:
         with SessionLocal() as db:
@@ -111,11 +121,14 @@ class CallSession:
         self._closed = True
         if self._watchdog:
             self._watchdog.cancel()
+        if self._greeting:
+            self._greeting.cancel()
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
         if self._recording:
             self._recording.close()
-        await asyncio.get_running_loop().run_in_executor(None, self._finalize, reason)
+        # Shielded: a cancel (e.g. during shutdown) would otherwise discard the save if it is still queued for a thread.
+        await asyncio.shield(asyncio.get_running_loop().run_in_executor(None, self._finalize, reason))
 
     def _finalize(self, reason: str) -> None:
         if not self.call_id:
@@ -169,7 +182,10 @@ class CallSession:
     async def on_audio(self, audio: np.ndarray, sample_rate: int | None = None) -> None:
         if self._closed or self.turns is None:
             return
-        a16 = resample(audio, sample_rate or self.input_sr, PIPELINE_SR)
+        sr = sample_rate or self.input_sr
+        if sr != self._resampler.src_sr:
+            self._resampler = StreamResampler(sr, PIPELINE_SR)
+        a16 = self._resampler.process(audio)
         if self._recording:
             self._recording.writeframes((np.clip(a16, -1, 1) * 32767).astype("<i2").tobytes())
         # While we talk, require stronger evidence of speech (helps with echo).
@@ -319,6 +335,34 @@ class CallSession:
         w.setsampwidth(2)
         w.setframerate(PIPELINE_SR)
         self._recording = w
+
+
+def recover_interrupted_calls() -> int:
+    """Close calls a restart or crash left "in progress". Live calls exist only inside the running process,
+    so run this once at start-up, before any new call can begin. Returns how many were closed."""
+    from sqlalchemy import func, select
+
+    with SessionLocal() as db:
+        stale = db.scalars(select(Call).where(Call.status == "in_progress")).all()
+        for call in stale:
+            # The real end is unknown; its last recorded activity is the closest honest answer.
+            last_activity = db.scalar(select(func.max(CallEvent.ts)).where(CallEvent.call_id == call.id))
+            call.ended_at = last_activity or call.started_at
+            call.duration_sec = int((call.ended_at - call.started_at).total_seconds())
+            call.status, call.outcome = "failed", "failed"
+            call.error_detail = "The server restarted during this call."
+            call.summary = call.summary or "The call was cut off by a server restart."
+            if call.is_demo:
+                continue
+            call.follow_up_status = "needed"
+            tenant = db.get(Tenant, call.tenant_id)
+            if tenant is not None:
+                who = call.caller_name or call.caller_number or "Unknown caller"
+                notify(db, tenant, "system_failure", "A call was cut off",
+                       f"The server restarted during a call from {who}. Please call them back.",
+                       link=f"/calls?id={call.id}", entity_type="call", entity_id=call.id)
+        db.commit()
+        return len(stale)
 
 
 def purge_expired(now=None) -> int:

@@ -4,6 +4,7 @@
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: voicerep
       POSTGRES_PASSWORD: ${DB_PASSWORD:-change-me-locally}
@@ -16,6 +17,7 @@ services:
 
   api:
     build: ./backend
+    restart: unless-stopped
     depends_on:
       db: {condition: service_healthy}
     environment:
@@ -29,9 +31,11 @@ services:
       VR_ASR_MODEL: ${VR_ASR_MODEL:-base.en}                       # tiny.en | base.en | small.en
       VR_AUTO_INSTALL_MODELS: ${VR_AUTO_INSTALL_MODELS:-true}      # download Whisper + Kokoro on first start
     volumes: [appdata:/app/data]    # models, uploads, recordings
-    ports: ["8000:8000"]
+    # 9092 is the AudioSocket listener. It has no login of its own, so only this machine (Asterisk) may reach it.
+    ports: ["8000:8000", "127.0.0.1:9092:9092"]
 
   web:
+    restart: unless-stopped
     build:
       context: .
       args: {BACKEND_URL: "http://api:8000"}

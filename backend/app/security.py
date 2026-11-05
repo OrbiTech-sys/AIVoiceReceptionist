@@ -77,6 +77,16 @@ def normalize_phone(raw: str | None, default_region: str = "US") -> str | None:
     return phonenumbers.format_number(num, phonenumbers.PhoneNumberFormat.E164)
 
 
+def dialled_number_candidates(raw: str) -> list[str]:
+    """Every E.164 number that a dialled number sent by a carrier could mean.
+
+    Carriers often drop the "+", so digits alone are ambiguous: "4155550100" is both +41 55 550 01 00 and
+    +1 415 555 0100. Match the result against configured numbers rather than guessing a single reading."""
+    raw = raw.strip()
+    forms = [f"+{raw}", raw] if raw.isdigit() else [raw]
+    return list(dict.fromkeys(n for n in map(normalize_phone, forms) if n))
+
+
 def format_phone(e164: str | None) -> str:
     if not e164:
         return ""

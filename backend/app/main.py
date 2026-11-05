@@ -29,12 +29,27 @@ def _auto_install_models() -> None:
         log.exception("automatic speech model install failed; install them from the Platform admin page")
 
 
+def _recover_interrupted_calls() -> None:
+    from .voice.session import recover_interrupted_calls
+
+    log = logging.getLogger("voicerep.calls")
+    try:
+        closed = recover_interrupted_calls()
+        if closed:
+            log.warning("closed %d call(s) left in progress by the previous run", closed)
+    except Exception:
+        log.exception("could not close calls left in progress")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
     stop = asyncio.Event()
     tasks = []
     adapter = None
+    if s.run_workers:
+        # Before the phone listener opens, so this can only touch calls from the previous run.
+        await asyncio.get_running_loop().run_in_executor(None, _recover_interrupted_calls)
     if s.audiosocket_enabled:
         adapter = AudioSocketAdapter(s.audiosocket_host, s.audiosocket_port)
         telephony_base.register(adapter)
