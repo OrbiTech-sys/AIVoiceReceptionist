@@ -1,6 +1,7 @@
 """Live phone configuration (Asterisk + SIP trunk) and the dialplan callback endpoints."""
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -15,13 +16,15 @@ from ..config import get_settings
 from ..db import get_db, utcnow
 from ..deps import TenantContext, client_ip, require_owner, require_tenant
 from ..errors import AppError, Conflict, Unauthorized
-from ..models import TelephonyIntegration
+from ..models import ReceptionistSettings, TelephonyIntegration
 from ..ratelimit import limiter
-from ..security import constant_eq, encrypt_secret, new_token, normalize_phone, token_hash
+from ..security import constant_eq, dialled_number_candidates, encrypt_secret, new_token, normalize_phone, token_hash
 from ..services.audit import audit
 from ..telephony import base
 from ..telephony.audiosocket import PendingCall, registry
+from ..voice import runtime
 
+log = logging.getLogger("voicerep.telephony")
 router = APIRouter(prefix="/api/telephony", tags=["telephony"])
 PROVIDER = "asterisk_audiosocket"
 HOST_RE = re.compile(r"^[A-Za-z0-9.\-]{1,200}(:\d{1,5})?$")
@@ -163,8 +166,8 @@ def disconnect(ctx: TenantContext = Depends(require_owner), db: Session = Depend
 
 @router.get("/asterisk-config", response_class=PlainTextResponse)
 def asterisk_config(ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db),
-                    api_host: str = Query("voicerep-api:8000", max_length=200),
-                    audiosocket_host: str = Query("voicerep-api", max_length=200)):
+                    api_host: str = Query("127.0.0.1:8000", max_length=200),
+                    audiosocket_host: str = Query("127.0.0.1", max_length=200)):
     """Generate pjsip.conf / extensions.conf snippets. The SIP password is NOT included."""
     i = _integration(db, ctx.tenant_id)
     if i is None:
@@ -227,21 +230,30 @@ exten => {i.did_number},1,Answer()
 def _authorize_dialplan(db: Session, token: str, did: str | None) -> TelephonyIntegration:
     th = token_hash(token)
     if did:
-        e164 = normalize_phone(did)
-        i = db.scalar(select(TelephonyIntegration).where(TelephonyIntegration.did_number == e164))
+        match = TelephonyIntegration.did_number.in_(dialled_number_candidates(did))
     else:
-        i = db.scalar(select(TelephonyIntegration).where(TelephonyIntegration.inbound_token_hash == th))
-    if i is None or not constant_eq(i.inbound_token_hash, th):
-        raise Unauthorized("invalid token")
-    return i
+        match = TelephonyIntegration.inbound_token_hash == th
+    for i in db.scalars(select(TelephonyIntegration).where(match)):
+        if constant_eq(i.inbound_token_hash, th):
+            return i
+    raise Unauthorized("invalid token")
 
 
 @router.get("/asterisk/precall", response_class=PlainTextResponse)
 def precall(request: Request, uuid: str = Query(..., pattern=r"^[0-9a-fA-F-]{36}$"), token: str = Query(..., max_length=100),
             did: str = Query(..., max_length=32), caller: str = Query("", max_length=32), db: Session = Depends(get_db)):
-    """Called by the Asterisk dialplan before handing audio to AudioSocket."""
+    """Called by the Asterisk dialplan before handing audio to AudioSocket.
+
+    Returns "ok" to take the call. Anything else ("off", "unavailable") means the receptionist must not answer:
+    a phone caller has no screen to show an error on, so a call it can't serve would just be silence."""
     limiter.check(f"precall:{client_ip(request)}", 120, 60)
     i = _authorize_dialplan(db, token, did)
+    settings = db.get(ReceptionistSettings, i.tenant_id)
+    if settings is not None and not settings.enabled:
+        return "off"
+    if not runtime.voice_ready():
+        log.warning("refused a call for tenant %s: speech models are not ready", i.tenant_id)
+        return "unavailable"
     registry.announce(uuid, PendingCall(i.tenant_id, i.id, caller or None, i.did_number, time.monotonic()))
     i.last_call_at = utcnow()
     db.commit()

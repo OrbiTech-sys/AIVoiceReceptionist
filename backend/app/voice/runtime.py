@@ -94,6 +94,13 @@ def warmup() -> dict:
     return res
 
 
+def voice_ready() -> bool:
+    """Could a caller be heard and answered right now? Unlike readiness(), this never probes the optional LLM
+    over the network, so it is cheap enough to check on every incoming call."""
+    return (mm.installed_asr() is not None and "asr" not in _errors
+            and mm.is_installed("tts-kokoro") and "tts" not in _errors)
+
+
 def readiness() -> dict:
     from .llm import llm_status
 

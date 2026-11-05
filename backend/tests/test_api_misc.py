@@ -91,7 +91,8 @@ def test_event_preferences_suppress_notifications(owner):
         assert db.query(Notification).filter(Notification.kind == "appointment_booked").count() == 0
 
 
-def test_telephony_config_secrets_and_dialplan_auth(owner, other_owner):
+def test_telephony_config_secrets_and_dialplan_auth(owner, other_owner, monkeypatch):
+    monkeypatch.setattr("app.voice.runtime.voice_ready", lambda: True)  # no speech models in the test environment
     r = owner.put("/api/telephony", json={"did_number": "+1 415 555 0100", "sip_host": "sip.example.net",
                                           "sip_username": "acct1", "sip_password": "s3cret-pass"})
     assert r.status_code == 200, r.text

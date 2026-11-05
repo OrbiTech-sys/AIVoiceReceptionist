@@ -17,6 +17,7 @@ pytest==9.2.0
 python-dateutil==3.0.0
 python-multipart==0.0.32
 pywebpush==2.5.0
+soxr==1.1.0
 SQLAlchemy==2.1.6
 tzdata==2026.6
 uvicorn==0.54.0

@@ -25,6 +25,10 @@ log = logging.getLogger("voicerep.audiosocket")
 KIND_HANGUP, KIND_UUID, KIND_DTMF, KIND_AUDIO, KIND_ERROR = 0x00, 0x01, 0x03, 0x10, 0xFF
 PHONE_SR = 8000
 FRAME_BYTES = 320  # 20 ms of 8 kHz 16-bit mono
+FRAME_SECONDS = 0.02
+SILENT_FRAME = b"\0" * FRAME_BYTES
+MAX_CATCH_UP_S = 0.1  # after a stall, resume normal pacing rather than bursting the backlog at the caller
+DRAIN_TIMEOUT_S = 5.0  # the most we wait for the last words to play before hanging up
 PRECALL_TTL = 60.0
 
 
@@ -90,31 +94,38 @@ class AudioSocketTransport:
         return None  # no side channel on a phone line
 
     async def send_audio(self, audio: np.ndarray, sample_rate: int) -> None:
-        self._out.extend(float_to_pcm16(resample(audio, sample_rate, PHONE_SR)))
+        pcm = float_to_pcm16(resample(audio, sample_rate, PHONE_SR))
+        # Only whole frames go out, so every clip is padded to end on a frame boundary.
+        self._out.extend(pcm + b"\0" * (-len(pcm) % FRAME_BYTES))
 
     async def stop_audio(self) -> None:
         self._out.clear()
 
     async def _pace(self) -> None:
+        """Send one frame every 20 ms: queued speech, otherwise silence.
+
+        The constant stream matters: Asterisk ends the session after 2 seconds with no audio in either
+        direction, which can happen on a quiet line when the carrier suppresses silence."""
         next_t = time.monotonic()
         try:
             while not self._closed:
-                if len(self._out) >= FRAME_BYTES:
+                if self._out:
                     chunk = bytes(self._out[:FRAME_BYTES])
                     del self._out[:FRAME_BYTES]
-                    self.writer.write(frame(KIND_AUDIO, chunk))
-                    await self.writer.drain()
-                    next_t += 0.02
-                    await asyncio.sleep(max(0.0, next_t - time.monotonic()))
                 else:
-                    next_t = time.monotonic()
-                    await asyncio.sleep(0.01)
+                    chunk = SILENT_FRAME
+                self.writer.write(frame(KIND_AUDIO, chunk))
+                await self.writer.drain()
+                now = time.monotonic()
+                next_t = max(next_t + FRAME_SECONDS, now - MAX_CATCH_UP_S)
+                await asyncio.sleep(max(0.0, next_t - now))
         except (ConnectionError, asyncio.CancelledError):
             pass
 
     @property
     def pending_audio(self) -> bool:
-        return len(self._out) > 0
+        """Speech still to be sent. False once the line is gone, because nothing will ever send it."""
+        return bool(self._out) and not self._pacer.done()
 
     async def close(self) -> None:
         self._closed = True
@@ -179,7 +190,8 @@ class AudioSocketAdapter:
                 done, _ = await asyncio.wait({rd, end_wait}, return_when=asyncio.FIRST_COMPLETED)
                 if end_wait in done:
                     rd.cancel()
-                    while transport.pending_audio:
+                    deadline = time.monotonic() + DRAIN_TIMEOUT_S
+                    while transport.pending_audio and time.monotonic() < deadline:
                         await asyncio.sleep(0.05)
                     break
                 kind, payload = rd.result()
