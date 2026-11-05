@@ -17,10 +17,12 @@ log = logging.getLogger("voicerep.workers")
 
 def tick() -> dict:
     from .services import delivery, reminders
+    from .telephony import health
 
     out = {}
     with SessionLocal() as db:
         out["reminders"] = reminders.run_due(db)
+    out["asterisk_down"] = health.check_heartbeat()  # before the outbox, so an alert goes out in this same pass
     with SessionLocal() as db:
         out["outbox"] = delivery.process_outbox(db)
     return out

@@ -56,6 +56,10 @@ class CallRegistry:
         self._gc()
         return self.pending.pop(call_uuid.lower(), None)
 
+    def pending_count(self) -> int:
+        self._gc()
+        return len(self.pending)
+
     def set_action(self, call_uuid: str, action: str) -> None:
         self.actions[call_uuid.lower()] = (action, time.monotonic())
 
@@ -152,11 +156,19 @@ class AudioSocketAdapter:
             log.error(self.error)
             _mark_offline(self.error)
 
-    async def stop(self) -> None:
-        if self._server:
-            self._server.close()
+    async def stop(self, drain_seconds: float = 0.0) -> None:
+        """Stop taking calls, and give the ones in progress up to drain_seconds to finish."""
+        if not self._server:
+            return
+        self._server.close()
+        deadline = time.monotonic() + drain_seconds
+        while self.active_calls and time.monotonic() < deadline:
+            await asyncio.sleep(0.25)
+        if self.active_calls:
+            log.warning("shutting down with %d call(s) still in progress", self.active_calls)
+        else:
             await self._server.wait_closed()
-            self._server = None
+        self._server = None
 
     def status(self) -> dict:
         return {"listening": self._server is not None, "host": self.host, "port": self.port, "error": self.error,

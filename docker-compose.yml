@@ -30,6 +30,9 @@ services:
       VR_LLM_URL: ${VR_LLM_URL:-}
       VR_ASR_MODEL: ${VR_ASR_MODEL:-base.en}                       # tiny.en | base.en | small.en
       VR_AUTO_INSTALL_MODELS: ${VR_AUTO_INSTALL_MODELS:-true}      # download Whisper + Kokoro on first start
+      VR_ASTERISK_TOKEN: ${VR_ASTERISK_TOKEN:-}                    # same value as the asterisk service
+      VR_MAX_CONCURRENT_CALLS: ${VR_MAX_CONCURRENT_CALLS:-4}
+    stop_grace_period: 130s         # lets calls finish during a deploy; keep this above the API's 120-second wait
     volumes: [appdata:/app/data]    # models, uploads, recordings
     # 9092 is the AudioSocket listener. It has no login of its own, so only this machine (Asterisk) may reach it.
     ports: ["8000:8000", "127.0.0.1:9092:9092"]
@@ -57,12 +60,18 @@ services:
     volumes: ["appdata:/app/data:ro"]
     mem_limit: 2g
 
-  # Asterisk handles SIP. Mount your generated pjsip.conf / extensions.conf (Integrations -> Phone line).
+  # Asterisk answers SIP calls and streams their audio to the API. OFF by default; see deploy/asterisk/README.txt.
   asterisk:
-    image: andrius/asterisk:latest
+    build: ./deploy/asterisk
     profiles: ["phone"]
+    restart: unless-stopped
     network_mode: host      # SIP/RTP need host networking; AudioSocket reaches the API on localhost:9092
-    volumes: ["./deploy/asterisk:/etc/asterisk/custom:ro"]
+    environment:
+      VR_ASTERISK_TOKEN: ${VR_ASTERISK_TOKEN:-}
+      ASTERISK_PUBLIC_IP: ${ASTERISK_PUBLIC_IP:-}
+      ASTERISK_LOCAL_NET: ${ASTERISK_LOCAL_NET:-172.31.0.0/16}
+      SIP_PROVIDER_HOST: ${SIP_PROVIDER_HOST:-}
+      SIP_PROVIDER_IPS: ${SIP_PROVIDER_IPS:-}
 
 volumes:
   pgdata:

@@ -31,7 +31,7 @@ Sign in with the seeded demo owner `demo@example.com` / `DemoOwner2026!` (demo b
 ```bash
 cp backend/.env.example .env   # set VR_SECRET_KEY, DB_PASSWORD
 docker compose up --build
-docker compose --profile phone up   # also start Asterisk
+docker compose --profile phone up   # also start Asterisk (see deploy/asterisk/README.txt)
 docker compose --profile llm up -d  # also start the optional LLM (see "Optional LLM" below; needs ~2 GB more RAM)
 ```
 > The compose file and Dockerfiles were written but **not built or run** in the development environment (Docker wasn't installed there). Treat as unverified until you run it once.
@@ -57,11 +57,11 @@ To turn it off again, remove both lines from `.env`, run `docker compose rm -sf 
 ### Cost transparency
 1. **Software / AI inference:** free. MIT/Apache models, no per-call fees.
 2. **Hosting / hardware:** you pay for a server. CPU-only is fine for the demo; measured here (8 threads, no GPU): Whisper base.en transcribes a 3 s utterance in ~1 s; Kokoro synthesizes at ~0.6× real time, first audio ≈ 1–3 s. Concurrent live calls need more cores.
-3. **Telephony:** a phone number, SIP trunk and call minutes are paid by you to your provider. Entering a number in the UI does **not** connect it; you must configure SIP/forwarding. Forwarding from an existing number is set up with your carrier (options and costs vary); porting takes days.
+3. **Telephony:** a phone number, SIP trunk and call minutes are paid by you to your provider. Assigning a number in the UI does **not** connect it; it must be a number on your SIP account, with the trunk set up. Forwarding from an existing number is set up with your carrier (options and costs vary); porting takes days.
 4. **Optional:** SMTP, SMS (not implemented), hosting domain/TLS.
 
 ### Live phone setup (summary)
-*Integrations → Phone line*: enter your DID, SIP host and credentials (password stored Fernet-encrypted, never shown again), generate the Asterisk `pjsip.conf` / `extensions.conf`, load them in Asterisk, and call the number. Status becomes **Connected only after a real call reaches the receptionist.** Not tested against a real SIP provider in development — only the AudioSocket adapter (framing, unknown-call rejection, hang-up, ending a call, transfer signalling, silence frames, failures) is covered by automated tests. The dialplan only hands a call to the receptionist when `precall` answers `ok`; it answers `off` when the receptionist is turned off and `unavailable` when the speech models aren't ready.
+All businesses share one Asterisk and one SIP account. Set them up once by following [deploy/asterisk/README.txt](deploy/asterisk/README.txt), then assign each business a number under *Platform admin → Businesses*. Status becomes **Connected only after a real call reaches the receptionist.** A call the receptionist can't take (turned off, speech models not ready, or already at `VR_MAX_CONCURRENT_CALLS`) goes to the business's transfer number; without one, it's recorded as missed and the owner is alerted. Not tested with a real SIP provider or a running Asterisk in development: automated tests cover the AudioSocket adapter, the API callbacks, and the config files against the API.
 
 ## Licensing notes (verify before commercial deployment)
 - faster-whisper, Whisper weights, Silero VAD, onnxruntime: MIT. Kokoro-82M weights: Apache-2.0; `kokoro-onnx`: MIT. Qwen2.5 (optional): Apache-2.0.
@@ -74,12 +74,12 @@ Argon2id passwords, server-side sessions in HttpOnly cookies, CSRF header on mut
 
 ## Tests
 ```bash
-cd backend && .venv/Scripts/python -m pytest -q     # 71 tests (the real-audio one is skipped until the speech models are installed)
+cd backend && .venv/Scripts/python -m pytest -q     # 92 tests (the real-audio one is skipped until the speech models are installed)
 npx tsc --noEmit && npx eslint . && npm run build
 ```
 
 ### Test report (last run in development environment)
-- Backend: **70 passed, 1 skipped** (6 consecutive full runs, on Python 3.13 without the speech packages; the skipped test is the real-audio one). Covers phone call start, audio and hang-up behaviour, auth/CSRF/rate limit, tenant isolation, staff role, hours validation, availability (hours, breaks, buffers, holidays, notice, staff calendars), concurrent double-booking (6 threads → 1 booking), reschedule/cancel/status transitions, policy notice, contact de-duplication, DST/time-zone handling, reminder uniqueness and exactly-once delivery across 4 workers, upload validation, telephony secrets/dialplan auth/AudioSocket failures, LLM output validation, dialog safety (emergency, injection, medical advice, no invented prices), the 10-step booking scenario over WebSocket, migrations, and a **real-audio** test (synthesized speech → Silero → Whisper → dialog → Kokoro) when models are installed.
+- Backend: **91 passed, 1 skipped** (3 consecutive full runs, on Python 3.13 without the speech packages; the skipped test is the real-audio one). Covers phone call start, audio and hang-up behaviour, number assignment, call limits, Asterisk heartbeats and config files, auth/CSRF/rate limit, tenant isolation, staff role, hours validation, availability (hours, breaks, buffers, holidays, notice, staff calendars), concurrent double-booking (6 threads → 1 booking), reschedule/cancel/status transitions, policy notice, contact de-duplication, DST/time-zone handling, reminder uniqueness and exactly-once delivery across 4 workers, upload validation, telephony secrets/dialplan auth/AudioSocket failures, LLM output validation, dialog safety (emergency, injection, medical advice, no invented prices), the 10-step booking scenario over WebSocket, migrations, and a **real-audio** test (synthesized speech → Silero → Whisper → dialog → Kokoro) when models are installed.
 - Frontend: `tsc --noEmit`, `eslint` and `next build` pass. UI was exercised manually in a browser pane: login, overview, and a full typed booking conversation that persisted an appointment, notification and reminder.
 - **Not verified:** real microphone capture (blocked in the test browser — use *Test microphone* in the UI), audible playback/barge-in in a real browser, mobile/push delivery to a real device, PostgreSQL (tests run on SQLite; the Postgres exclusion constraint and advisory locks are untested), Docker, Asterisk with a real SIP trunk, the optional LLM path against a live llama-server.
 - **Known issues:** Speech understanding is rule-based English only; unusual phrasing may need a human callback. Echo cancellation on phone lines relies on a raised VAD threshold while the agent is speaking; headphones are recommended for the browser demo.

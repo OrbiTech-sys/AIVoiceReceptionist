@@ -252,7 +252,11 @@ class CallSession:
                 return
             dialog_ms = int((time.perf_counter() - t0) * 1000)
             self._log("latency", "", {"asr_ms": asr_ms, "dialog_ms": dialog_ms})
-            await self.say(reply, dialog_ms=dialog_ms)
+            try:
+                await self.say(reply, dialog_ms=dialog_ms)
+            except Exception as exc:
+                log.exception("speaking failed")
+                await self._fail(f"TTS error: {type(exc).__name__}")
 
     # ------------------------------------------------------------------ audio out
     async def say(self, reply: Reply, dialog_ms: int | None = None) -> None:
@@ -316,6 +320,9 @@ class CallSession:
                     return
         except asyncio.CancelledError:
             pass
+        except Exception as exc:
+            log.exception("speaking failed")
+            await self._fail(f"TTS error: {type(exc).__name__}")
 
     async def _fail(self, detail: str) -> None:
         self._failed = detail

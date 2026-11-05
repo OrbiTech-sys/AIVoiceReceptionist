@@ -1,0 +1,2 @@
+# These run or are read inside a Linux container, so they must keep Linux line endings on every machine.
+deploy/asterisk/** text eol=lf

@@ -1,11 +1,14 @@
-"""Live phone configuration (Asterisk + SIP trunk) and the dialplan callback endpoints."""
+"""Phone numbers, and the callbacks Asterisk makes during a call.
+
+All businesses share one Asterisk and one SIP account owned by the platform. A platform admin assigns each business a
+phone number, and the dialled number on an incoming call says which business it's for.
+"""
 from __future__ import annotations
 
 import logging
-import re
 import time
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -14,33 +17,26 @@ from sqlalchemy.orm import Session
 
 from ..config import get_settings
 from ..db import get_db, utcnow
-from ..deps import TenantContext, client_ip, require_owner, require_tenant
-from ..errors import AppError, Conflict, Unauthorized
-from ..models import ReceptionistSettings, TelephonyIntegration
+from ..deps import AuthContext, TenantContext, client_ip, require_platform_admin, require_tenant
+from ..errors import AppError, Conflict, NotFound, Unauthorized
+from ..models import Call, ReceptionistSettings, TelephonyIntegration, Tenant
 from ..ratelimit import limiter
-from ..security import constant_eq, dialled_number_candidates, encrypt_secret, new_token, normalize_phone, token_hash
+from ..security import constant_eq, dialled_number_candidates, format_phone, normalize_phone
 from ..services.audit import audit
-from ..telephony import base
+from ..services.notifications import notify
+from ..telephony import base, health
 from ..telephony.audiosocket import PendingCall, registry
 from ..voice import runtime
 
 log = logging.getLogger("voicerep.telephony")
 router = APIRouter(prefix="/api/telephony", tags=["telephony"])
 PROVIDER = "asterisk_audiosocket"
-HOST_RE = re.compile(r"^[A-Za-z0-9.\-]{1,200}(:\d{1,5})?$")
-CHECKLIST = ("sip_account", "asterisk_installed", "dialplan_loaded", "forwarding_enabled", "test_call_received")
-
-
-class ConfigIn(BaseModel):
-    did_number: str = Field(min_length=4, max_length=32)
-    sip_host: str = Field(min_length=3, max_length=200)
-    sip_username: str = Field(min_length=1, max_length=120)
-    sip_password: str | None = Field(None, max_length=200)  # omit to keep the stored secret
-    forwarding_number: str = Field("", max_length=32)
-
-
-class ChecklistIn(BaseModel):
-    items: dict[str, bool]
+UUID_PATTERN = r"^[0-9a-fA-F-]{36}$"
+REFUSAL_DETAIL = {
+    "off": "the receptionist is turned off",
+    "unavailable": "the receptionist's speech models aren't ready",
+    "busy": "the receptionist was already on as many calls as it can handle",
+}
 
 
 def _integration(db: Session, tenant_id: str) -> TelephonyIntegration | None:
@@ -49,18 +45,12 @@ def _integration(db: Session, tenant_id: str) -> TelephonyIntegration | None:
 
 
 def integration_out(i: TelephonyIntegration | None) -> dict:
-    adapter = base.get(PROVIDER)
-    listener = adapter.status() if adapter else {"listening": False, "error": "adapter disabled"}
     if i is None:
-        return {"configured": False, "status": "not_configured", "listener": listener,
-                "checklist": {k: False for k in CHECKLIST}}
+        return {"configured": False, "status": "not_configured"}
     return {
-        "configured": True, "status": i.status, "provider": i.provider, "did_number": i.did_number,
-        "sip_host": i.sip_host, "sip_username": i.sip_username, "has_password": bool(i.sip_password_enc),
-        "forwarding_number": i.forwarding_number, "inbound_token_hint": i.inbound_token_hint,
+        "configured": True, "status": i.status, "did_number": i.did_number, "did_display": format_phone(i.did_number),
         "last_validated_at": i.last_validated_at.isoformat() if i.last_validated_at else None,
         "last_call_at": i.last_call_at.isoformat() if i.last_call_at else None, "last_error": i.last_error,
-        "checklist": {k: bool((i.checklist or {}).get(k)) for k in CHECKLIST}, "listener": listener,
     }
 
 
@@ -69,200 +59,142 @@ def get_integration(ctx: TenantContext = Depends(require_tenant), db: Session = 
     return integration_out(_integration(db, ctx.tenant_id))
 
 
-@router.put("")
-def put_integration(body: ConfigIn, ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
+# ------------------------------------------------------------------ assigning numbers (platform admin)
+class AssignIn(BaseModel):
+    did_number: str = Field(min_length=4, max_length=32)
+
+
+@router.put("/admin/tenants/{tenant_id}")
+def assign_number(tenant_id: str, body: AssignIn, ctx: AuthContext = Depends(require_platform_admin), db: Session = Depends(get_db)):
+    if db.get(Tenant, tenant_id) is None:
+        raise NotFound("Unknown business.")
     did = normalize_phone(body.did_number)
     if not did:
-        raise AppError("Enter the phone number in international format, e.g. +1 415 555 0100.", code="invalid_phone")
-    if not HOST_RE.match(body.sip_host):
-        raise AppError("SIP host must be a hostname or IP address, optionally with :port.", code="invalid_host")
-    fwd = normalize_phone(body.forwarding_number) if body.forwarding_number else ""
-    if body.forwarding_number and not fwd:
-        raise AppError("Existing business number is not valid.", code="invalid_phone")
-    i = _integration(db, ctx.tenant_id)
-    token = None
-    if i is None:
-        i = TelephonyIntegration(tenant_id=ctx.tenant_id, provider=PROVIDER, checklist={})
-        db.add(i)
-        token = new_token()
-        i.inbound_token_hash, i.inbound_token_hint = token_hash(token), token[:6]
-    changed = (i.did_number != did or i.sip_host != body.sip_host or i.sip_username != body.sip_username
-               or body.sip_password is not None)
-    i.did_number, i.sip_host, i.sip_username, i.forwarding_number = did, body.sip_host.strip(), body.sip_username.strip(), fwd or ""
-    if body.sip_password is not None:
-        i.sip_password_enc = encrypt_secret(body.sip_password)
-    if not i.sip_password_enc:
-        raise AppError("Enter the SIP password from your provider.", code="password_required")
-    if changed or i.status == "not_configured":
-        # Never claim "connected" until a real call has arrived with this configuration.
-        i.status = "pending_validation"
-        i.checklist = {**(i.checklist or {}), "test_call_received": False}
+        raise AppError("Enter a valid phone number, for example +1 415 555 0100.", code="invalid_phone")
+    i = _integration(db, tenant_id) or TelephonyIntegration(tenant_id=tenant_id, provider=PROVIDER, checklist={})
+    if i.did_number != did:
+        i.did_number = did
+        i.status = "pending_validation"  # never "connected" until a real call has reached this number
+        i.last_validated_at = None
+        i.last_error = ""
+    db.add(i)
     try:
-        audit(db, "telephony.configured", tenant_id=ctx.tenant_id, user_id=ctx.user.id, entity_type="telephony")
+        audit(db, "telephony.number_assigned", tenant_id=tenant_id, user_id=ctx.user.id, entity_type="telephony")
         db.commit()
     except IntegrityError:
         db.rollback()
-        raise Conflict("This phone number is already connected to another business.", code="did_taken")
-    out = integration_out(i)
-    if token:
-        out["inbound_token"] = token  # shown once
-    return out
-
-
-@router.post("/rotate-token")
-def rotate_token(ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
-    i = _integration(db, ctx.tenant_id)
-    if i is None:
-        raise AppError("Save the phone configuration first.", code="not_configured")
-    token = new_token()
-    i.inbound_token_hash, i.inbound_token_hint = token_hash(token), token[:6]
-    i.status = "pending_validation"
-    audit(db, "telephony.token_rotated", tenant_id=ctx.tenant_id, user_id=ctx.user.id, entity_type="telephony")
-    db.commit()
-    return {**integration_out(i), "inbound_token": token}
-
-
-@router.put("/checklist")
-def put_checklist(body: ChecklistIn, ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
-    i = _integration(db, ctx.tenant_id)
-    if i is None:
-        raise AppError("Save the phone configuration first.", code="not_configured")
-    # test_call_received can only be set by a real call.
-    items = {k: bool(v) for k, v in body.items.items() if k in CHECKLIST and k != "test_call_received"}
-    i.checklist = {**(i.checklist or {}), **items}
-    db.commit()
+        raise Conflict("This phone number is already assigned to another business.", code="did_taken")
     return integration_out(i)
 
 
-@router.post("/validate")
-def validate(ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
-    i = _integration(db, ctx.tenant_id)
-    if i is None:
-        raise AppError("Save the phone configuration first.", code="not_configured")
-    adapter = base.get(PROVIDER)
-    problems = []
-    if adapter is None or not adapter.status()["listening"]:
-        problems.append("The AudioSocket listener is not running on the server.")
-    if not i.sip_password_enc:
-        problems.append("SIP password is missing.")
-    if i.status != "connected":
-        problems.append("No test call has reached the receptionist yet. Call your number to finish validation.")
-    i.last_error = " ".join(problems)[:300]
-    if problems and i.status == "connected" and adapter and not adapter.status()["listening"]:
-        i.status = "error"
-    db.commit()
-    return {**integration_out(i), "problems": problems}
-
-
-@router.delete("")
-def disconnect(ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
-    i = _integration(db, ctx.tenant_id)
+@router.delete("/admin/tenants/{tenant_id}")
+def remove_number(tenant_id: str, ctx: AuthContext = Depends(require_platform_admin), db: Session = Depends(get_db)):
+    i = _integration(db, tenant_id)
     if i is not None:
         db.delete(i)
-        audit(db, "telephony.disconnected", tenant_id=ctx.tenant_id, user_id=ctx.user.id, entity_type="telephony")
+        audit(db, "telephony.number_removed", tenant_id=tenant_id, user_id=ctx.user.id, entity_type="telephony")
         db.commit()
     return integration_out(None)
 
 
-@router.get("/asterisk-config", response_class=PlainTextResponse)
-def asterisk_config(ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db),
-                    api_host: str = Query("127.0.0.1:8000", max_length=200),
-                    audiosocket_host: str = Query("127.0.0.1", max_length=200)):
-    """Generate pjsip.conf / extensions.conf snippets. The SIP password is NOT included."""
-    i = _integration(db, ctx.tenant_id)
-    if i is None:
-        raise AppError("Save the phone configuration first.", code="not_configured")
-    if not HOST_RE.match(api_host) or not HOST_RE.match(audiosocket_host):
-        raise AppError("Invalid host.", code="invalid_host")
-    port = get_settings().audiosocket_port
-    t = f"t{ctx.tenant_id[:8]}"
-    host = i.sip_host
-    return f"""; ===== pjsip.conf (append) =====
-; SIP trunk for {ctx.tenant.name}. Replace <SIP_PASSWORD> with the password from your provider.
-[{t}-trunk]
-type=registration
-outbound_auth={t}-auth
-server_uri=sip:{host}
-client_uri=sip:{i.sip_username}@{host}
-
-[{t}-auth]
-type=auth
-auth_type=userpass
-username={i.sip_username}
-password=<SIP_PASSWORD>
-
-[{t}-aor]
-type=aor
-contact=sip:{host}
-
-[{t}-endpoint]
-type=endpoint
-context=voicerep-inbound
-disallow=all
-allow=ulaw,alaw
-outbound_auth={t}-auth
-aors={t}-aor
-direct_media=no
-
-[{t}-identify]
-type=identify
-endpoint={t}-endpoint
-match={host.split(':')[0]}
-
-; ===== extensions.conf (append) =====
-; Requires app_audiosocket and func_curl (both ship with Asterisk 18+).
-[voicerep-inbound]
-exten => {i.did_number},1,Answer()
- same => n,Set(VR_UUID=${{SHELL(cat /proc/sys/kernel/random/uuid | tr -d '\\n')}})
- same => n,Set(VR_OK=${{CURL(http://{api_host}/api/telephony/asterisk/precall?uuid=${{VR_UUID}}&did=${{URIENCODE(${{EXTEN}})}}&caller=${{URIENCODE(${{CALLERID(num)}})}}&token=<INBOUND_TOKEN>)}})
- same => n,GotoIf($["${{VR_OK}}" != "ok"]?failed)
- same => n,AudioSocket(${{VR_UUID}},{audiosocket_host}:{port})
- same => n,Set(VR_NEXT=${{CURL(http://{api_host}/api/telephony/asterisk/next-action?uuid=${{VR_UUID}}&token=<INBOUND_TOKEN>)}})
- same => n,GotoIf($["${{VR_NEXT:0:9}}" = "transfer:"]?transfer)
- same => n,Hangup()
- same => n(transfer),Dial(PJSIP/${{VR_NEXT:9}}@{t}-endpoint,30)
- same => n,Hangup()
- same => n(failed),Playback(ss-noservice)
- same => n,Hangup()
-"""
+# ------------------------------------------------------------------ callbacks from Asterisk's dialplan
+def _authorize_dialplan(request: Request, token: str) -> None:
+    limiter.check(f"asterisk:{client_ip(request)}", 300, 60)
+    expected = get_settings().asterisk_token
+    if not expected or not constant_eq(expected, token):
+        raise Unauthorized("invalid token")
 
 
-def _authorize_dialplan(db: Session, token: str, did: str | None) -> TelephonyIntegration:
-    th = token_hash(token)
-    if did:
-        match = TelephonyIntegration.did_number.in_(dialled_number_candidates(did))
-    else:
-        match = TelephonyIntegration.inbound_token_hash == th
-    for i in db.scalars(select(TelephonyIntegration).where(match)):
-        if constant_eq(i.inbound_token_hash, th):
+def _integration_for_dialled_number(db: Session, did: str) -> TelephonyIntegration | None:
+    for number in dialled_number_candidates(did):
+        i = db.scalar(select(TelephonyIntegration).where(TelephonyIntegration.did_number == number))
+        if i is not None:
             return i
-    raise Unauthorized("invalid token")
+    return None
 
 
-@router.get("/asterisk/precall", response_class=PlainTextResponse)
-def precall(request: Request, uuid: str = Query(..., pattern=r"^[0-9a-fA-F-]{36}$"), token: str = Query(..., max_length=100),
-            did: str = Query(..., max_length=32), caller: str = Query("", max_length=32), db: Session = Depends(get_db)):
-    """Called by the Asterisk dialplan before handing audio to AudioSocket.
+def _calls_in_progress() -> int:
+    adapter = base.get(PROVIDER)
+    return registry.pending_count() + (adapter.status()["active_calls"] if adapter else 0)
 
-    Returns "ok" to take the call. Anything else ("off", "unavailable") means the receptionist must not answer:
-    a phone caller has no screen to show an error on, so a call it can't serve would just be silence."""
-    limiter.check(f"precall:{client_ip(request)}", 120, 60)
-    i = _authorize_dialplan(db, token, did)
+
+def _refuse(db: Session, i: TelephonyIntegration, settings: ReceptionistSettings | None, reason: str, uuid: str, caller: str) -> str:
+    """Hand a call the receptionist can't take to the business's transfer number, and make sure it isn't lost silently."""
+    number = settings.transfer_number if settings else ""
+    detail = REFUSAL_DETAIL[reason]
+    call = Call(tenant_id=i.tenant_id, channel="phone", external_id=uuid.lower(), caller_number=normalize_phone(caller),
+                status="completed", ended_at=utcnow(), duration_sec=0)
+    if number:
+        call.outcome = "transferred"
+        call.summary = f"Forwarded to the transfer number because {detail}."
+    else:
+        call.outcome = "missed"
+        call.follow_up_status = "needed"
+        call.summary = f"Not answered because {detail}."
+    db.add(call)
+    db.flush()
+    if not number:
+        tenant = db.get(Tenant, i.tenant_id)
+        who = call.caller_number or "Unknown caller"
+        notify(db, tenant, "call_missed", f"Missed call from {who}", call.summary,
+               link=f"/calls?id={call.id}", entity_type="call", entity_id=call.id)
+    db.commit()
+    return f"forward:{number}" if number else reason
+
+
+@router.post("/asterisk/precall", response_class=PlainTextResponse)
+def precall(request: Request, uuid: str = Form(..., pattern=UUID_PATTERN), token: str = Form(..., max_length=200),
+            did: str = Form(..., max_length=32), caller: str = Form("", max_length=32), db: Session = Depends(get_db)):
+    """Asterisk asks this before answering a call. Returns "ok" to take it, or "forward:<number>" to send it to the
+    business's transfer number. Anything else means nobody can take it: a phone caller has no screen to show an error
+    on, so a call the receptionist can't serve would otherwise just be silence."""
+    _authorize_dialplan(request, token)
+    i = _integration_for_dialled_number(db, did)
+    if i is None:
+        log.warning("call to a number no business has: %r", did)
+        return "unknown"
     settings = db.get(ReceptionistSettings, i.tenant_id)
     if settings is not None and not settings.enabled:
-        return "off"
+        return _refuse(db, i, settings, "off", uuid, caller)
     if not runtime.voice_ready():
         log.warning("refused a call for tenant %s: speech models are not ready", i.tenant_id)
-        return "unavailable"
+        return _refuse(db, i, settings, "unavailable", uuid, caller)
+    if _calls_in_progress() >= get_settings().max_concurrent_calls:
+        log.warning("refused a call for tenant %s: at the limit of %d calls", i.tenant_id, get_settings().max_concurrent_calls)
+        return _refuse(db, i, settings, "busy", uuid, caller)
     registry.announce(uuid, PendingCall(i.tenant_id, i.id, caller or None, i.did_number, time.monotonic()))
     i.last_call_at = utcnow()
     db.commit()
     return "ok"
 
 
-@router.get("/asterisk/next-action", response_class=PlainTextResponse)
-def next_action(request: Request, uuid: str = Query(..., pattern=r"^[0-9a-fA-F-]{36}$"), token: str = Query(..., max_length=100),
-                db: Session = Depends(get_db)):
-    limiter.check(f"precall:{client_ip(request)}", 120, 60)
-    _authorize_dialplan(db, token, None)
+@router.post("/asterisk/next-action", response_class=PlainTextResponse)
+def next_action(request: Request, uuid: str = Form(..., pattern=UUID_PATTERN), token: str = Form(..., max_length=200)):
+    _authorize_dialplan(request, token)
     return registry.action(uuid)
+
+
+@router.post("/asterisk/transfer-failed", response_class=PlainTextResponse)
+def transfer_failed(request: Request, uuid: str = Form(..., pattern=UUID_PATTERN), token: str = Form(..., max_length=200),
+                    db: Session = Depends(get_db)):
+    """Nobody picked up after the receptionist transferred a caller, so someone needs to call them back."""
+    _authorize_dialplan(request, token)
+    call = db.scalar(select(Call).where(Call.external_id == uuid.lower()))
+    if call is None:
+        return "unknown"
+    call.outcome = "answered"
+    call.follow_up_status = "needed"
+    call.summary = f"{call.summary} The transfer wasn't answered.".strip()
+    who = call.caller_name or call.caller_number or "Unknown caller"
+    notify(db, db.get(Tenant, call.tenant_id), "callback_requested", f"Call back: {who}",
+           "They asked for a person, but nobody answered the transfer.",
+           link=f"/calls?id={call.id}", entity_type="call", entity_id=call.id)
+    db.commit()
+    return "ok"
+
+
+@router.post("/asterisk/heartbeat", response_class=PlainTextResponse)
+def heartbeat(request: Request, token: str = Form(..., max_length=200), db: Session = Depends(get_db)):
+    _authorize_dialplan(request, token)
+    health.record_heartbeat(db)
+    return "ok"

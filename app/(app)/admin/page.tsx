@@ -4,7 +4,8 @@ import { Download, Gauge, HardDrive, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useSession } from "@/components/session";
 import { useToast } from "@/components/toast";
-import { Badge, Button, Card, EmptyState, ErrorNote, PageHeader, Skeleton } from "@/components/ui";
+import { PHONE_STATUS_LABEL } from "@/components/phone-setup";
+import { Badge, Button, Card, EmptyState, ErrorNote, Field, Input, Modal, PageHeader, Skeleton, statusTone } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
 import { relTime } from "@/lib/format";
 import { useApi } from "@/lib/hooks";
@@ -16,14 +17,55 @@ interface Model {
   progress: { state: string; downloaded: number; total: number; error: string };
 }
 
+interface Business {
+  id: string; name: string; business_type: string; created_at: string; members: number; calls: number; appointments: number;
+  is_demo: boolean; onboarding_completed: boolean; phone_number: string | null; phone_status: string;
+}
+
+function AssignNumber({ business, onClose, onSaved }: { business: Business; onClose: () => void; onSaved: () => void }) {
+  const [number, setNumber] = useState(business.phone_number ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const url = `/api/telephony/admin/tenants/${business.id}`;
+
+  const run = async (request: () => Promise<unknown>) => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await request();
+      onSaved();
+      onClose();
+    } catch (e) {
+      setErr(errorMessage(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Phone number for ${business.name}`} footer={
+      <>
+        {business.phone_number && <Button variant="danger" disabled={busy} onClick={() => {
+          if (confirm(`Remove ${business.phone_number} from ${business.name}? Calls to it will stop reaching this business.`)) void run(() => api(url, { method: "DELETE" }));
+        }}>Remove number</Button>}
+        <Button variant="primary" loading={busy} disabled={!number.trim()} onClick={() => void run(() => api(url, { method: "PUT", body: { did_number: number } }))}>Save</Button>
+      </>
+    }>
+      <Field label="Phone number" htmlFor="assign-did" hint="A number on your SIP account. The business shows as Connected after the first real call to it.">
+        <Input id="assign-did" type="tel" value={number} onChange={(e) => setNumber(e.target.value)} placeholder="+1 415 555 0100" />
+      </Field>
+      {err && <p role="alert" className="mt-2 text-[13px] text-danger">{err}</p>}
+    </Modal>
+  );
+}
+
 export default function AdminPage() {
   const { me } = useSession();
   const toast = useToast();
   const models = useApi<{ models: Model[]; hardware: { cpu_count: number; ram_gb: number | null; disk_free_gb: number }; readiness: Readiness }>(
     me.user.is_platform_admin ? "/api/admin/models" : null, { poll: 2000 });
-  const tenants = useApi<{ id: string; name: string; business_type: string; created_at: string; members: number; calls: number; appointments: number; is_demo: boolean; onboarding_completed: boolean }[]>(
-    me.user.is_platform_admin ? "/api/admin/tenants" : null);
+  const tenants = useApi<Business[]>(me.user.is_platform_admin ? "/api/admin/tenants" : null);
   const [warm, setWarm] = useState(false);
+  const [assigning, setAssigning] = useState<Business | null>(null);
 
   if (!me.user.is_platform_admin) return <EmptyState title="Platform administrators only" />;
   const hw = models.data?.hardware;
@@ -88,17 +130,18 @@ export default function AdminPage() {
       <Card className="mt-6" title="Businesses">
         {!tenants.data ? <Skeleton className="h-24" /> : (
           <div className="-mx-4 overflow-x-auto sm:-mx-5">
-            <table className="w-full min-w-[600px] text-sm">
-              <thead className="border-y border-border bg-surface-2/50 text-left text-xs text-muted"><tr><th className="px-4 py-2 font-medium sm:px-5">Business</th><th className="px-3 py-2 font-medium">Type</th><th className="px-3 py-2 font-medium">Members</th><th className="px-3 py-2 font-medium">Calls</th><th className="px-3 py-2 font-medium">Appointments</th><th className="px-3 py-2 font-medium">Created</th></tr></thead>
+            <table className="w-full min-w-[780px] text-sm">
+              <thead className="border-y border-border bg-surface-2/50 text-left text-xs text-muted"><tr><th className="px-4 py-2 font-medium sm:px-5">Business</th><th className="px-3 py-2 font-medium">Phone number</th><th className="px-3 py-2 font-medium">Type</th><th className="px-3 py-2 font-medium">Members</th><th className="px-3 py-2 font-medium">Calls</th><th className="px-3 py-2 font-medium">Appointments</th><th className="px-3 py-2 font-medium">Created</th></tr></thead>
               <tbody className="divide-y divide-border">
                 {tenants.data.map((t) => (
-                  <tr key={t.id}><td className="px-4 py-2 sm:px-5">{t.name} {t.is_demo && <Badge>Demo</Badge>} {!t.onboarding_completed && <Badge tone="warning">Onboarding</Badge>}</td><td className="px-3 py-2 text-muted">{t.business_type}</td><td className="px-3 py-2 tabular-nums">{t.members}</td><td className="px-3 py-2 tabular-nums">{t.calls}</td><td className="px-3 py-2 tabular-nums">{t.appointments}</td><td className="px-3 py-2 text-muted">{relTime(t.created_at)}</td></tr>
+                  <tr key={t.id}><td className="px-4 py-2 sm:px-5">{t.name} {t.is_demo && <Badge>Demo</Badge>} {!t.onboarding_completed && <Badge tone="warning">Onboarding</Badge>}</td><td className="px-3 py-2"><div className="flex flex-wrap items-center gap-2">{t.phone_number && <span className="tabular-nums">{t.phone_number}</span>}<Badge tone={statusTone(t.phone_status)} dot>{PHONE_STATUS_LABEL[t.phone_status] ?? t.phone_status}</Badge><Button size="sm" onClick={() => setAssigning(t)}>{t.phone_number ? "Change" : "Assign"}</Button></div></td><td className="px-3 py-2 text-muted">{t.business_type}</td><td className="px-3 py-2 tabular-nums">{t.members}</td><td className="px-3 py-2 tabular-nums">{t.calls}</td><td className="px-3 py-2 tabular-nums">{t.appointments}</td><td className="px-3 py-2 text-muted">{relTime(t.created_at)}</td></tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
       </Card>
+      {assigning && <AssignNumber business={assigning} onClose={() => setAssigning(null)} onSaved={() => tenants.reload(true)} />}
     </>
   );
 }

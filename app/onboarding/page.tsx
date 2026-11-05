@@ -112,7 +112,7 @@ export default function Onboarding() {
             <div className="grid gap-3 sm:grid-cols-2">
               {([
                 ["demo", "Demo mode", "Test the receptionist with your browser's microphone. No phone number or provider needed. Free."],
-                ["live", "Live phone mode", "Connect a SIP phone line through Asterisk. Requires a SIP provider (paid number + call minutes)."],
+                ["live", "Live phone mode", "Answer real calls on your receptionist's own phone number, assigned by your platform administrator."],
               ] as const).map(([id, title, desc]) => (
                 <button key={id} onClick={() => setPhoneMode(id)}
                   className={cx("rounded-xl border p-4 text-left transition-colors", phoneMode === id ? "border-accent bg-accent-soft" : "border-border hover:bg-surface-2")}>

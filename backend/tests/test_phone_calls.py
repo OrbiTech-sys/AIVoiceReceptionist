@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import re
+import shutil
+import subprocess
 import threading
 import time
 import uuid as uuidlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,7 +21,8 @@ from test_voice import _free_port, _tenant_with_integration
 from app.config import get_settings
 from app.db import SessionLocal, utcnow
 from app.main import app
-from app.models import Call, CallEvent, Notification, ReceptionistSettings, TelephonyIntegration
+from app.models import Call, CallEvent, Notification, ReceptionistSettings, TelephonyIntegration, User
+from app.telephony import health
 from app.telephony.audiosocket import (
     FRAME_BYTES,
     KIND_AUDIO,
@@ -349,80 +355,327 @@ def test_server_start_closes_calls_left_in_progress(owner, monkeypatch):
 
 
 # ------------------------------------------------------------------ deciding whether to take a call
-def _precall(owner, token: str, did: str = "%2B14155550100"):
-    return owner.c.get(f"/api/telephony/asterisk/precall?uuid={CALL_UUID}&did={did}&caller=%2B14155550999&token={token}")
+TOKEN = "test-asterisk-token"
+
+
+def _precall(owner, did: str = DID, token: str = TOKEN, caller: str = CALLER):
+    return owner.c.post("/api/telephony/asterisk/precall", data={"uuid": CALL_UUID, "did": did, "caller": caller, "token": token})
+
+
+def _set_receptionist(tenant_id: str, **values) -> None:
+    with SessionLocal() as db:
+        settings = db.get(ReceptionistSettings, tenant_id) or ReceptionistSettings(tenant_id=tenant_id)
+        for key, value in values.items():
+            setattr(settings, key, value)
+        db.add(settings)
+        db.commit()
 
 
 @pytest.fixture
-def inbound_token(owner, monkeypatch) -> str:
+def phone_line(owner, monkeypatch) -> str:
+    """A business with a number, and a receptionist that's ready. Returns the business's id."""
     monkeypatch.setattr(runtime, "voice_ready", lambda: True)
     registry.pending.clear()
-    r = owner.put("/api/telephony", json={"did_number": DID, "sip_host": "sip.example.net", "sip_username": "acct", "sip_password": "pw"})
-    assert r.status_code == 200, r.text
-    return r.json()["inbound_token"]
+    tenant_id, _ = _tenant_with_integration(owner)
+    return tenant_id
 
 
-def test_precall_accepts_a_call_when_ready(owner, inbound_token):
-    r = _precall(owner, inbound_token)
+def test_precall_accepts_a_call_when_ready(owner, phone_line):
+    r = _precall(owner)
     assert r.status_code == 200 and r.text == "ok"
-    assert registry.claim(CALL_UUID) is not None
+    pending = registry.claim(CALL_UUID)
+    assert pending is not None and pending.tenant_id == phone_line
 
 
-def test_precall_refuses_when_the_receptionist_is_turned_off(owner, inbound_token):
-    with SessionLocal() as db:
-        tenant_id = db.query(TelephonyIntegration).one().tenant_id
-        settings = db.get(ReceptionistSettings, tenant_id) or ReceptionistSettings(tenant_id=tenant_id)
-        settings.enabled = False
-        db.add(settings)
-        db.commit()
-    r = _precall(owner, inbound_token)
+def test_dialplan_callbacks_need_the_token_and_post(owner, phone_line):
+    assert _precall(owner, token="wrong-token").status_code == 401
+    assert owner.c.post("/api/telephony/asterisk/next-action", data={"uuid": CALL_UUID, "token": "wrong"}).status_code == 401
+    assert owner.c.post("/api/telephony/asterisk/heartbeat", data={"token": "wrong"}).status_code == 401
+    assert owner.c.get(f"/api/telephony/asterisk/precall?uuid={CALL_UUID}&did={DID}&token={TOKEN}").status_code == 405
+
+
+def test_dialplan_callbacks_are_closed_until_a_token_is_configured(owner, phone_line, monkeypatch):
+    monkeypatch.setattr(get_settings(), "asterisk_token", "")
+    assert _precall(owner, token="").status_code in (401, 422)
+    assert _precall(owner, token="anything").status_code == 401
+
+
+def test_next_action_defaults_to_hanging_up(owner, phone_line):
+    assert owner.c.post("/api/telephony/asterisk/next-action", data={"uuid": CALL_UUID, "token": TOKEN}).text == "hangup"
+
+
+def test_precall_refuses_when_the_receptionist_is_turned_off(owner, phone_line):
+    _set_receptionist(phone_line, enabled=False)
+    r = _precall(owner)
     assert r.status_code == 200 and r.text == "off"
     assert registry.claim(CALL_UUID) is None
 
 
-def test_precall_refuses_when_speech_models_are_not_ready(owner, inbound_token, monkeypatch):
+def test_precall_refuses_when_speech_models_are_not_ready(owner, phone_line, monkeypatch):
     monkeypatch.setattr(runtime, "voice_ready", lambda: False)
-    r = _precall(owner, inbound_token)
-    assert r.status_code == 200 and r.text == "unavailable"
+    assert _precall(owner).text == "unavailable"
     assert registry.claim(CALL_UUID) is None
+
+
+def test_precall_refuses_above_the_call_limit(owner, phone_line, monkeypatch):
+    monkeypatch.setattr(get_settings(), "max_concurrent_calls", 1)
+    assert _precall(owner).text == "ok"  # now one call is on its way
+    assert _precall(owner, caller="+14155550998").text == "busy"
+    registry.pending.clear()
+    assert _precall(owner).text == "ok"
+
+
+def test_refused_call_is_recorded_and_the_owner_is_told(owner, phone_line, monkeypatch):
+    monkeypatch.setattr(runtime, "voice_ready", lambda: False)
+    _precall(owner)
+    with SessionLocal() as db:
+        call = db.query(Call).one()
+        assert call.status == "completed" and call.outcome == "missed" and call.follow_up_status == "needed"
+        assert call.caller_number == CALLER and "speech models" in call.summary
+        alert = db.query(Notification).filter(Notification.kind == "call_missed").one()
+        assert alert.entity_id == call.id
+
+
+def test_refused_call_goes_to_the_transfer_number_when_there_is_one(owner, phone_line):
+    _set_receptionist(phone_line, enabled=False, transfer_number="+14155550111")
+    assert _precall(owner).text == "forward:+14155550111"
+    with SessionLocal() as db:
+        assert db.query(Call).one().outcome == "transferred"
+        assert db.query(Notification).filter(Notification.kind == "call_missed").count() == 0  # someone will answer
 
 
 def test_voice_ready_is_false_without_models():
     assert runtime.voice_ready() is False
 
 
-@pytest.mark.parametrize("sent", ["%2B14155550100", "14155550100", "4155550100"])
-def test_precall_understands_how_carriers_send_a_us_number(owner, inbound_token, sent):
-    assert _precall(owner, inbound_token, did=sent).text == "ok"
+@pytest.mark.parametrize("sent", ["+14155550100", "14155550100", "4155550100"])
+def test_precall_understands_how_carriers_send_a_us_number(owner, phone_line, sent):
+    assert _precall(owner, did=sent).text == "ok"
 
 
-@pytest.mark.parametrize("sent", ["%2B61291234567", "61291234567"])
-def test_precall_understands_how_carriers_send_an_international_number(owner, monkeypatch, sent):
-    monkeypatch.setattr(runtime, "voice_ready", lambda: True)
-    r = owner.put("/api/telephony", json={"did_number": "+61 2 9123 4567", "sip_host": "sip.example.net",
-                                          "sip_username": "acct", "sip_password": "pw"})
-    assert r.status_code == 200, r.text
-    assert _precall(owner, r.json()["inbound_token"], did=sent).text == "ok"
-
-
-def test_precall_uses_the_token_when_a_number_could_mean_two_businesses(owner, other_owner, inbound_token):
-    # "4155550100" is both +1 415 555 0100 and +41 55 550 01 00.
-    r = other_owner.put("/api/telephony", json={"did_number": "+41 55 550 01 00", "sip_host": "sip.example.net",
-                                                "sip_username": "acct", "sip_password": "pw"})
-    assert r.status_code == 200, r.text
-    assert _precall(owner, inbound_token, did="4155550100").text == "ok"
+def test_precall_understands_a_number_without_its_plus(owner, phone_line):
     with SessionLocal() as db:
-        ours = db.query(TelephonyIntegration).filter(TelephonyIntegration.did_number == DID).one()
-    assert registry.claim(CALL_UUID).tenant_id == ours.tenant_id
+        db.query(TelephonyIntegration).one().did_number = "+61291234567"
+        db.commit()
+    assert _precall(owner, did="61291234567").text == "ok"
 
 
-def test_precall_rejects_an_unknown_number_or_wrong_token(owner, inbound_token):
-    assert _precall(owner, inbound_token, did="%2B14155550199").status_code == 401
-    assert _precall(owner, "wrong-token").status_code == 401
+def test_call_to_a_number_no_business_has_is_refused(owner, phone_line):
+    assert _precall(owner, did="+14155550199").text == "unknown"
+    with SessionLocal() as db:
+        assert db.query(Call).count() == 0
 
 
-def test_generated_config_points_at_this_server(owner, inbound_token):
-    cfg = owner.get("/api/telephony/asterisk-config").text
-    assert "voicerep-api" not in cfg
-    assert "http://127.0.0.1:8000/api/telephony/asterisk/precall" in cfg
-    assert "127.0.0.1:9092" in cfg
+def test_unanswered_transfer_asks_the_owner_to_call_back(owner, phone_line):
+    with SessionLocal() as db:
+        db.add(Call(tenant_id=phone_line, channel="phone", external_id=CALL_UUID, status="completed", outcome="transferred", caller_number=CALLER))
+        db.commit()
+    r = owner.c.post("/api/telephony/asterisk/transfer-failed", data={"uuid": CALL_UUID, "token": TOKEN})
+    assert r.text == "ok"
+    with SessionLocal() as db:
+        call = db.query(Call).one()
+        assert call.outcome == "answered" and call.follow_up_status == "needed"
+        assert db.query(Notification).filter(Notification.kind == "callback_requested", Notification.entity_id == call.id).count() >= 1
+
+
+# ------------------------------------------------------------------ assigning numbers
+def _make_platform_admin(email: str) -> None:
+    with SessionLocal() as db:
+        db.query(User).filter(User.email == email).one().is_platform_admin = True
+        db.commit()
+
+
+def test_platform_admin_assigns_a_number_and_the_owner_sees_it(owner, other_owner):
+    _make_platform_admin("owner@example.com")
+    assert other_owner.get("/api/telephony").json() == {"configured": False, "status": "not_configured"}
+    tenants = owner.get("/api/admin/tenants").json()
+    salon = next(t for t in tenants if t["name"] == "Other Salon")
+    assert salon["phone_number"] is None and salon["phone_status"] == "not_configured"
+
+    r = owner.put(f"/api/telephony/admin/tenants/{salon['id']}", json={"did_number": "+1 415 555 0100"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "pending_validation"  # never "connected" before a real call
+
+    seen = other_owner.get("/api/telephony").json()
+    assert seen["did_number"] == DID and seen["configured"] is True
+    salon = next(t for t in owner.get("/api/admin/tenants").json() if t["name"] == "Other Salon")
+    assert salon["phone_number"] == DID
+
+    assert owner.delete(f"/api/telephony/admin/tenants/{salon['id']}").status_code == 200
+    assert other_owner.get("/api/telephony").json()["configured"] is False
+
+
+def test_changing_a_number_needs_a_new_test_call(owner):
+    _make_platform_admin("owner@example.com")
+    tenant_id, integ_id = _tenant_with_integration(owner)
+    with SessionLocal() as db:
+        db.get(TelephonyIntegration, integ_id).status = "connected"
+        db.commit()
+    url = f"/api/telephony/admin/tenants/{tenant_id}"
+    assert owner.put(url, json={"did_number": DID}).json()["status"] == "connected"  # same number: nothing changes
+    assert owner.put(url, json={"did_number": "+14155550101"}).json()["status"] == "pending_validation"
+
+
+def test_one_number_cannot_belong_to_two_businesses(owner, other_owner):
+    _make_platform_admin("owner@example.com")
+    _tenant_with_integration(owner)
+    salon = next(t for t in owner.get("/api/admin/tenants").json() if t["name"] == "Other Salon")
+    r = owner.put(f"/api/telephony/admin/tenants/{salon['id']}", json={"did_number": DID})
+    assert r.status_code == 409
+
+
+def test_invalid_number_is_rejected(owner):
+    _make_platform_admin("owner@example.com")
+    tenant_id = owner.get("/api/admin/tenants").json()[0]["id"]
+    assert owner.put(f"/api/telephony/admin/tenants/{tenant_id}", json={"did_number": "12345"}).status_code == 400
+
+
+def test_only_a_platform_admin_can_assign_numbers(owner):
+    tenant_id, _ = _tenant_with_integration(owner)
+    assert owner.put(f"/api/telephony/admin/tenants/{tenant_id}", json={"did_number": "+14155550101"}).status_code == 403
+    assert owner.delete(f"/api/telephony/admin/tenants/{tenant_id}").status_code == 403
+
+
+# ------------------------------------------------------------------ noticing when Asterisk stops
+def test_owner_is_alerted_once_when_asterisk_goes_quiet_and_line_recovers(owner):
+    tenant_id, integ_id = _tenant_with_integration(owner)
+    now = utcnow()
+    assert health.check_heartbeat(now) is False  # no heartbeat yet: Asterisk may simply not be set up
+    with SessionLocal() as db:
+        db.get(TelephonyIntegration, integ_id).status = "connected"
+        db.commit()
+    assert owner.c.post("/api/telephony/asterisk/heartbeat", data={"token": TOKEN}).text == "ok"
+    assert health.check_heartbeat(utcnow() + timedelta(minutes=1)) is False
+
+    later = utcnow() + timedelta(minutes=4)
+    assert health.check_heartbeat(later) is True
+    assert health.check_heartbeat(later) is True
+    with SessionLocal() as db:
+        assert db.get(TelephonyIntegration, integ_id).status == "error"
+        assert db.query(Notification).filter(Notification.kind == "phone_offline").count() == 1
+
+    owner.c.post("/api/telephony/asterisk/heartbeat", data={"token": TOKEN})
+    with SessionLocal() as db:
+        line = db.get(TelephonyIntegration, integ_id)
+        assert line.status == "connected" and line.last_error == ""
+
+
+# ------------------------------------------------------------------ restarts during a call
+def test_restart_waits_for_a_call_in_progress_to_finish():
+    async def scenario():
+        port = _free_port()
+        adapter = AudioSocketAdapter("127.0.0.1", port)
+        await adapter.start()
+        adapter.active_calls = 1
+
+        async def call_ends():
+            await asyncio.sleep(0.5)
+            adapter.active_calls = 0
+
+        ending = asyncio.create_task(call_ends())
+        started = time.monotonic()
+        await adapter.stop(drain_seconds=5)
+        await ending
+        return time.monotonic() - started
+
+    assert 0.4 < asyncio.run(scenario()) < 3
+
+
+def test_restart_gives_up_waiting_after_the_limit():
+    async def scenario():
+        adapter = AudioSocketAdapter("127.0.0.1", _free_port())
+        await adapter.start()
+        adapter.active_calls = 1
+        started = time.monotonic()
+        await adapter.stop(drain_seconds=0.3)
+        return time.monotonic() - started, adapter.status()["listening"]
+
+    elapsed, listening = asyncio.run(scenario())
+    assert elapsed < 2 and listening is False
+
+
+# ------------------------------------------------------------------ voice failures during a call
+def test_voice_crash_mid_call_ends_the_call_instead_of_leaving_silence(owner, monkeypatch):
+    tenant_id, _ = _tenant_with_integration(owner)
+
+    class CrashesAfterGreeting(FakeTTS):
+        def synthesize(self, text, voice, speed=1.0):
+            if "hours" in text.lower() or "open" in text.lower():  # the answer to the caller's question
+                raise RuntimeError("voice engine crashed")
+            return super().synthesize(text, voice, speed)
+
+    monkeypatch.setattr(runtime, "get_tts", lambda: CrashesAfterGreeting())
+
+    async def scenario():
+        call = CallSession(tenant_id, QuietTransport(), channel="phone", input_sr=PHONE_SR)
+        await call.start()
+        await call.on_text("What are your hours?")
+        await asyncio.wait_for(call.end_requested.wait(), 5)
+        failed = call._failed
+        await call.close()
+        return failed
+
+    assert asyncio.run(scenario()) == "TTS error: RuntimeError"
+    with SessionLocal() as db:
+        call = db.query(Call).one()
+        assert call.status == "failed" and call.follow_up_status == "needed"
+
+
+# ------------------------------------------------------------------ Asterisk's config files
+ASTERISK_DIR = Path(__file__).resolve().parents[2] / "deploy" / "asterisk"
+RENDER_ENV = {"VR_ASTERISK_TOKEN": "secret-token", "ASTERISK_PUBLIC_IP": "203.0.113.7", "ASTERISK_LOCAL_NET": "172.31.0.0/16",
+              "SIP_PROVIDER_HOST": "sip.provider.example", "SIP_PROVIDER_IPS": "192.0.2.1, 192.0.2.2,198.51.100.0/24"}
+
+
+def _render(tmp_path, env: dict) -> subprocess.CompletedProcess:
+    sh = shutil.which("sh")
+    if sh is None:
+        pytest.skip("needs a POSIX shell")
+    script = (ASTERISK_DIR / "render-config.sh").as_posix()
+    return subprocess.run([sh, script, (ASTERISK_DIR / "config").as_posix(), tmp_path.as_posix()],
+                          env={"PATH": os.environ["PATH"], **env}, capture_output=True, text=True)
+
+
+def test_asterisk_config_is_rendered_from_settings(tmp_path):
+    result = _render(tmp_path, RENDER_ENV)
+    assert result.returncode == 0, result.stderr
+    pjsip = (tmp_path / "pjsip.conf").read_text()
+    assert "@" not in pjsip  # every placeholder was filled in
+    assert "external_media_address=203.0.113.7" in pjsip and "external_signaling_address=203.0.113.7" in pjsip
+    assert "local_net=172.31.0.0/16" in pjsip and "contact=sip:sip.provider.example" in pjsip
+    assert pjsip.rstrip().endswith("match=192.0.2.1\nmatch=192.0.2.2\nmatch=198.51.100.0/24")
+    assert {"extensions.conf", "rtp.conf", "modules.conf", "logger.conf"} <= {p.name for p in tmp_path.iterdir()}
+    assert not any("secret-token" in p.read_text() for p in tmp_path.iterdir())  # the token stays in the environment
+
+
+@pytest.mark.parametrize("missing", list(RENDER_ENV))
+def test_asterisk_refuses_to_start_with_a_setting_missing(tmp_path, missing):
+    result = _render(tmp_path, {k: v for k, v in RENDER_ENV.items() if k != missing})
+    assert result.returncode != 0 and missing in result.stderr
+
+
+def _dialplan() -> str:
+    return (ASTERISK_DIR / "config" / "extensions.conf").read_text()
+
+
+def test_dialplan_jumps_only_to_labels_that_exist():
+    text = _dialplan()
+    labels = set(re.findall(r"n\((\w+)\),", text))
+    targets = set(re.findall(r"\?(\w+)\)", text)) | set(re.findall(r"Goto\((\w+)\)", text))
+    assert targets and targets <= labels
+
+
+def test_dialplan_uses_routes_and_fields_the_api_has():
+    dialplan = _dialplan()
+    assert "VR_API=http://127.0.0.1:8000/api/telephony/asterisk)" in dialplan
+    paths = {f"/api/telephony/asterisk/{name}" for name in re.findall(r"\$\{VR_API\}/([\w-]+)", dialplan)}
+    paths |= set(re.findall(r"http://127\.0\.0\.1:8000(/api/[\w/-]+)", (ASTERISK_DIR / "heartbeat.sh").read_text()))
+    api = app.openapi()["paths"]
+    assert len(paths) == 4 and all("post" in api[p] for p in paths)
+    assert "uuid=${VR_UUID}&did=" in dialplan and "&caller=" in dialplan
+
+
+def test_dialplan_reaches_the_ports_the_app_uses():
+    port = get_settings().audiosocket_port
+    assert f"127.0.0.1:{port}" in _dialplan()
+    assert f'"127.0.0.1:{port}:{port}"' in (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()

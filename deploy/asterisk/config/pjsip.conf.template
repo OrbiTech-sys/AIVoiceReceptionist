@@ -1,0 +1,37 @@
+; Rendered when the container starts by render-config.sh, using values from the server's .env file.
+
+[global]
+type=global
+user_agent=OrbiTech Receptionist
+
+; The server sits behind AWS's 1:1 NAT, so it must tell the provider its public address. Without this, audio fails.
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+local_net=@ASTERISK_LOCAL_NET@
+external_media_address=@ASTERISK_PUBLIC_IP@
+external_signaling_address=@ASTERISK_PUBLIC_IP@
+
+; Calls are authenticated by IP address: the provider allows this server's Elastic IP, and only the provider's
+; addresses below are accepted. No password is stored.
+[provider]
+type=aor
+contact=sip:@SIP_PROVIDER_HOST@
+
+[provider]
+type=endpoint
+transport=transport-udp
+context=voicerep-inbound
+disallow=all
+allow=ulaw,alaw
+aors=provider
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+
+; render-config.sh adds one match= line per provider address after this. Keep this section last.
+[provider]
+type=identify
+endpoint=provider

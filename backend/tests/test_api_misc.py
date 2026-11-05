@@ -91,36 +91,6 @@ def test_event_preferences_suppress_notifications(owner):
         assert db.query(Notification).filter(Notification.kind == "appointment_booked").count() == 0
 
 
-def test_telephony_config_secrets_and_dialplan_auth(owner, other_owner, monkeypatch):
-    monkeypatch.setattr("app.voice.runtime.voice_ready", lambda: True)  # no speech models in the test environment
-    r = owner.put("/api/telephony", json={"did_number": "+1 415 555 0100", "sip_host": "sip.example.net",
-                                          "sip_username": "acct1", "sip_password": "s3cret-pass"})
-    assert r.status_code == 200, r.text
-    body = r.json()
-    token = body["inbound_token"]
-    assert body["status"] == "pending_validation"  # never "connected" before a real call
-    assert "s3cret-pass" not in r.text
-    again = owner.get("/api/telephony").json()
-    assert "inbound_token" not in again and again["has_password"] is True and "sip_password" not in again
-    with SessionLocal() as db:
-        stored = db.query(TelephonyIntegration).one().sip_password_enc
-        assert stored and "s3cret-pass" not in stored
-    cfg = owner.get("/api/telephony/asterisk-config")
-    assert cfg.status_code == 200 and "s3cret-pass" not in cfg.text and "<SIP_PASSWORD>" in cfg.text
-    # Another business cannot claim the same number.
-    r2 = other_owner.put("/api/telephony", json={"did_number": "+14155550100", "sip_host": "sip.example.net",
-                                                 "sip_username": "x", "sip_password": "y"})
-    assert r2.status_code == 409
-    # Dialplan callbacks require the inbound token.
-    uuid = "12345678-1234-1234-1234-123456789abc"
-    assert owner.c.get(f"/api/telephony/asterisk/precall?uuid={uuid}&did=%2B14155550100&token=wrong").status_code == 401
-    ok = owner.c.get(f"/api/telephony/asterisk/precall?uuid={uuid}&did=%2B14155550100&caller=%2B14155550999&token={token}")
-    assert ok.status_code == 200 and ok.text == "ok"
-    assert owner.c.get(f"/api/telephony/asterisk/next-action?uuid={uuid}&token={token}").text == "hangup"
-    v = owner.post("/api/telephony/validate").json()
-    assert v["problems"]  # listener disabled in tests and no test call yet
-
-
 def test_health_and_security_headers(owner):
     r = owner.get("/api/health")
     assert r.json()["database"] is True

@@ -149,11 +149,11 @@ def _free_port() -> int:
 
 
 def _tenant_with_integration(owner) -> tuple[str, str]:
-    r = owner.put("/api/telephony", json={"did_number": "+14155550100", "sip_host": "sip.example.net",
-                                          "sip_username": "acct", "sip_password": "pw"})
-    assert r.status_code == 200
     with SessionLocal() as db:
-        i = db.query(TelephonyIntegration).one()
+        tenant_id = db.scalar(select(Tenant.id).where(Tenant.name == "Test Dental"))
+        i = TelephonyIntegration(tenant_id=tenant_id, did_number="+14155550100", status="pending_validation", checklist={})
+        db.add(i)
+        db.commit()
         return i.tenant_id, i.id
 
 
