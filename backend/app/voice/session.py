@@ -19,7 +19,7 @@ from ..db import SessionLocal, utcnow
 from ..models import Call, CallEvent, Tenant
 from ..security import normalize_phone
 from ..services.notifications import notify
-from . import runtime
+from . import nlu, runtime
 from .dialog import Receptionist, Reply
 from .engines import PIPELINE_SR, StreamResampler, TurnDetector, split_sentences
 from .llm import LocalLLM
@@ -36,6 +36,7 @@ class Transport(Protocol):
 
 class CallSession:
     SILENCE_PROMPT_S = 9.0
+    HOLD_UNFINISHED_S = 2.5  # how long to wait for the rest of a sentence that stopped mid-way
 
     def __init__(self, tenant_id: str, transport: Transport, *, channel: str, caller_number: str | None = None,
                  external_id: str | None = None, input_sr: int = PIPELINE_SR, is_demo: bool = False):
@@ -59,6 +60,8 @@ class CallSession:
         self._failed: str | None = None
         self._watchdog: asyncio.Task | None = None
         self._greeting: asyncio.Task | None = None
+        self._held: tuple[str, float] | None = None  # the start of a sentence the caller hasn't finished
+        self._held_task: asyncio.Task | None = None
         self._resampler = StreamResampler(input_sr, PIPELINE_SR)
         self._recording: wave.Wave_write | None = None
         self._recording_name: str | None = None
@@ -123,6 +126,7 @@ class CallSession:
             self._watchdog.cancel()
         if self._greeting:
             self._greeting.cancel()
+        self._cancel_held_timer()
         if self._speak_task and not self._speak_task.done():
             self._speak_task.cancel()
         if self._recording:
@@ -195,9 +199,11 @@ class CallSession:
         for ev in self.turns.feed(a16):
             if ev.kind == "speech_start":
                 self._last_activity = time.monotonic()
+                self._cancel_held_timer()  # they are continuing, so don't answer the half sentence
                 if self.speaking:
                     await self.interrupt()
                 await self.transport.send_event({"type": "listening", "speech": True})
+                self._log("state", "caller started speaking")
             elif ev.kind == "turn_end" and ev.audio is not None:
                 self._last_activity = time.monotonic()
                 await self.transport.send_event({"type": "listening", "speech": False})
@@ -217,6 +223,7 @@ class CallSession:
             await self.transport.send_event({"type": "error", "message": "Speech recognition model is not installed."})
             return
         if audio16k.size < PIPELINE_SR * 0.25:
+            self._arm_held_timer()
             return
         loop = asyncio.get_running_loop()
         hint = self.dialog.asr_hint() if self.dialog else ""
@@ -227,8 +234,46 @@ class CallSession:
             await self._fail(f"ASR error: {type(exc).__name__}")
             return
         if not tr.text or tr.confidence < 0.15:
+            # Sound was detected but no words came out of it. Keep a record, so "it doesn't hear me" can be told apart
+            # from "it never got any sound" (see the call's events).
+            self._log("state", "sound heard but no words recognised",
+                      {"seconds": round(audio16k.size / PIPELINE_SR, 1), "peak": round(float(np.abs(audio16k).max()), 3),
+                       "confidence": round(tr.confidence, 2)})
+            self._arm_held_timer()
             return  # noise; ignore rather than talk over the caller
-        await self.on_text(tr.text, confidence=tr.confidence, asr_ms=tr.latency_ms)
+        text, confidence, continued = tr.text, tr.confidence, False
+        if self._held is not None:
+            # This continues a sentence that stopped half way.
+            self._cancel_held_timer()
+            text = f"{self._held[0].rstrip('.?! ')} {text}"
+            confidence = min(confidence, self._held[1])
+            self._held, continued = None, True
+        if not continued and nlu.looks_unfinished(text):
+            self._held = (text, confidence)
+            self._arm_held_timer()
+            return
+        await self.on_text(text, confidence=confidence, asr_ms=tr.latency_ms)
+
+    def _cancel_held_timer(self) -> None:
+        if self._held_task and not self._held_task.done():
+            self._held_task.cancel()
+        self._held_task = None
+
+    def _arm_held_timer(self) -> None:
+        """Answer a half sentence after all, if nothing more follows soon. No-op when nothing is being held."""
+        if self._held is None or self._closed:
+            return
+        self._cancel_held_timer()
+        self._held_task = asyncio.create_task(self._release_held())
+
+    async def _release_held(self) -> None:
+        try:
+            await asyncio.sleep(self.HOLD_UNFINISHED_S)
+        except asyncio.CancelledError:
+            return
+        held, self._held, self._held_task = self._held, None, None
+        if held is not None:
+            await self.on_text(held[0], confidence=held[1])
 
     async def on_text(self, text: str, *, confidence: float = 1.0, asr_ms: int | None = None) -> None:
         if self._closed or self.dialog is None:
@@ -283,7 +328,7 @@ class CallSession:
             self._speaking_until = time.monotonic() + min(6.0, len(text) / 15)
             return
         loop = asyncio.get_running_loop()
-        voice = self.dialog.snap.voice_id if self.dialog else "af_heart"
+        voice = runtime.effective_voice(self.dialog.snap.voice_id if self.dialog else "af_heart")
         speed = self.dialog.snap.speed if self.dialog else 1.0
         first = True
         t0 = time.perf_counter()

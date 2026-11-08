@@ -1,6 +1,7 @@
 # docker compose up --build
 # Web UI: http://localhost:3000   API: http://localhost:8000/api/health
-# Set VR_SECRET_KEY (and DB_PASSWORD) in a .env file next to this file for anything beyond local testing.
+# Settings come from the one .env next to this file (start from .env.example). For anything beyond local testing
+# set VR_SECRET_KEY and DB_PASSWORD there.
 services:
   db:
     image: postgres:16
@@ -29,7 +30,18 @@ services:
       VR_COOKIE_SECURE: ${VR_COOKIE_SECURE:-false}
       VR_LLM_URL: ${VR_LLM_URL:-}
       VR_ASR_MODEL: ${VR_ASR_MODEL:-base.en}                       # tiny.en | base.en | small.en
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      FISH_AUDIO_API_KEY: ${FISH_AUDIO_API_KEY:-}
+      VR_TTS_ENGINE: ${VR_TTS_ENGINE:-kokoro}                      # kokoro | piper
       VR_AUTO_INSTALL_MODELS: ${VR_AUTO_INSTALL_MODELS:-true}      # download Whisper + Kokoro on first start
+      VR_SMTP_HOST: ${VR_SMTP_HOST:-}                              # blank = e-mail reminders off
+      VR_SMTP_PORT: ${VR_SMTP_PORT:-587}
+      VR_SMTP_USERNAME: ${VR_SMTP_USERNAME:-}
+      VR_SMTP_PASSWORD: ${VR_SMTP_PASSWORD:-}
+      VR_SMTP_FROM: ${VR_SMTP_FROM:-}
+      VR_SMTP_STARTTLS: ${VR_SMTP_STARTTLS:-true}
+      VR_VAPID_CONTACT: ${VR_VAPID_CONTACT:-mailto:admin@example.com}
     volumes: [appdata:/app/data]    # models, uploads, recordings
     # 9092 is the AudioSocket listener. It has no login of its own, so only this machine (Asterisk) may reach it.
     ports: ["8000:8000", "127.0.0.1:9092:9092"]
@@ -38,7 +50,8 @@ services:
     restart: unless-stopped
     build:
       context: .
-      args: {BACKEND_URL: "http://api:8000"}
+      # .env itself stays out of the image (.dockerignore), so the one browser setting is handed over here.
+      args: {BACKEND_URL: "http://api:8000", NEXT_PUBLIC_VOICE_WS_ORIGIN: "${NEXT_PUBLIC_VOICE_WS_ORIGIN:-}"}
     depends_on: [api]
     ports: ["3000:3000"]
 

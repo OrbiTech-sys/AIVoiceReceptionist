@@ -1,0 +1,88 @@
+/* Hallmark tokens for the public site and the sign-in pages.
+ * Scoped to .mk so the signed-in app keeps its own theme, including dark mode.
+ * Paper hue 85 (warm limestone). The accent is the app's existing brand blue, #2f5bd3, written in OKLCH. */
+
+:root:has(.mk),
+.mk {
+  --color-paper: oklch(97% 0.008 85);
+  --color-paper-2: oklch(94.6% 0.011 85);
+  --color-paper-3: oklch(91% 0.013 85);
+  --color-surface: oklch(99% 0.004 85);
+  --color-rule: oklch(86% 0.012 85);
+  --color-rule-2: oklch(70% 0.014 85);
+  --color-subtle: oklch(50% 0.012 75);
+  --color-muted: oklch(41% 0.012 70);
+  --color-ink-2: oklch(31% 0.016 265);
+  --color-ink: oklch(21% 0.018 265);
+  --color-accent: oklch(51.4% 0.191 265);
+  --color-accent-deep: oklch(42% 0.17 265);
+  --color-accent-wash: oklch(93.5% 0.028 265);
+  --color-accent-ink: oklch(98.5% 0.005 265);
+  --color-focus: oklch(51.4% 0.191 265);
+  --color-danger: oklch(47% 0.17 32);
+  --color-danger-wash: oklch(95% 0.022 32);
+  --color-success: oklch(45% 0.11 160);
+
+  --font-display: var(--font-newsreader), "Iowan Old Style", "Palatino Linotype", serif;
+  --font-body: var(--font-geist-sans), ui-sans-serif, sans-serif;
+  --font-label: var(--font-geist-mono), ui-monospace, monospace;
+
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-base: 1.0625rem;
+  --text-md: 1.25rem;
+  --text-lg: 1.5625rem;
+  --text-xl: clamp(2rem, 2.2vw + 1.3rem, 3.125rem);
+  --text-display-s: clamp(2.5rem, 3.6vw + 1.3rem, 4.25rem);
+  --text-display: clamp(2.75rem, 5vw + 1rem, 5.25rem);
+  --weight-display: 400;
+
+  --space-3xs: 0.125rem;
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2.5rem;
+  --space-2xl: 4rem;
+  --space-3xl: 6rem;
+  --space-4xl: 9rem;
+
+  --page-max: 78rem;
+  --page-gutter: clamp(1rem, 4vw, 3rem);
+  --rule-hair: 1px;
+  --rule-stage: 2px;
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+}
+
+/* The shared form components read the app's token names, so they pick up this palette automatically. */
+.mk {
+  --bg: var(--color-paper);
+  --surface: var(--color-surface);
+  --surface-2: var(--color-paper-2);
+  --border: var(--color-rule);
+  --border-strong: var(--color-rule-2);
+  --text: var(--color-ink);
+  --muted: var(--color-muted);
+  --subtle: var(--color-subtle);
+  --accent: var(--color-accent);
+  --accent-hover: var(--color-accent-deep);
+  --accent-soft: var(--color-accent-wash);
+  --accent-fg: var(--color-accent-ink);
+  --danger: var(--color-danger);
+  --danger-soft: var(--color-danger-wash);
+  --ring: var(--color-accent-wash);
+  color-scheme: light;
+}

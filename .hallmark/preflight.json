@@ -1,0 +1,8 @@
+{
+  "scanned": "2026-11-08",
+  "framework": "Next.js 16.4.3 (app router, Cache Components)",
+  "fonts": "Geist + Geist Mono via next/font (app/layout.tsx)",
+  "palette": "hex tokens + Tailwind v4 @theme inline (app/globals.css); brand blue #2f5bd3",
+  "motion": "no motion library",
+  "preserved": ["Geist body", "brand blue accent", "app tokens and dark mode"]
+}

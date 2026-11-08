@@ -14,6 +14,7 @@ from .telephony import base as telephony_base
 from .telephony.audiosocket import AudioSocketAdapter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def _auto_install_models() -> None:
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
         # Load speech models in the background so the first call doesn't pay the start-up cost.
         from .voice import runtime
 
-        asyncio.get_running_loop().run_in_executor(None, runtime.warmup)
+        asyncio.get_running_loop().run_in_executor(None, runtime.startup_warmup)
         if s.auto_install_models:
             asyncio.get_running_loop().run_in_executor(None, _auto_install_models)
     yield

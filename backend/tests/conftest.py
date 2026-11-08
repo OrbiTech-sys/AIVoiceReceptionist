@@ -16,6 +16,11 @@ os.environ.update({
     "VR_AUDIOSOCKET_ENABLED": "false",
 })
 
+from app.config import Settings  # noqa: E402
+
+# Tests must not pick up whatever the developer has in the project's .env (SMTP, LLM URL, ...).
+Settings.model_config["env_file"] = None
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 

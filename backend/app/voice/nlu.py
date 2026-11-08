@@ -35,6 +35,32 @@ def has(t: str, *patterns: str) -> bool:
     return any(re.search(p, t) for p in patterns)
 
 
+_MISHEARD = ((re.compile(r"\bapartments?\b", re.I), "appointment"), (re.compile(r"\bconsolation\b", re.I), "consultation"),
+             (re.compile(r"\ba point ?ment\b", re.I), "appointment"))
+
+
+def fix_mishearings(text: str) -> str:
+    """Speech recognition turns "appointment" into "apartment" and the like. Callers of a business that takes
+    appointments almost never mean the other word."""
+    for pattern, word in _MISHEARD:
+        text = pattern.sub(word, text)
+    return text
+
+
+# Where a caller stopped mid-sentence: the rest is about to follow.
+_UNFINISHED_END = re.compile(r"\b(i want|i'd like|i would like|i need|i'm|can you|could you|can i|could i|tell me|please|"
+                             r"to|for|and|but|the|a|an|my|of|with|about|is|are|i|you|if|or|so|because|in|at|on|what)$")
+
+
+def looks_unfinished(text: str) -> bool:
+    """A short utterance that ends on a word that can't end a sentence ("I want", "Can you please"). The caller is
+    usually still thinking, so it is better to wait for the rest than to answer half a sentence."""
+    t = norm(text)
+    if not t or len(t.split()) > 8 or is_affirm(text) or is_deny(text) or is_greeting(text):
+        return False
+    return bool(_UNFINISHED_END.search(t))
+
+
 # ------------------------------------------------------------------ intents
 END_CALL = r"\b(bye|goodbye|good bye|hang up|wrong number|end (of |the )*call)\b"
 
@@ -49,6 +75,8 @@ INTENT_PATTERNS: list[tuple[str, tuple[str, ...]]] = [
     ("cancel", (r"\bcancel", r"\bcan't make (it|my appointment)", r"\bcannot make (it|my appointment)", r"\bcall off")),
     ("check_appointment", (r"when is my (appointment|booking)", r"do i have an? (appointment|booking)", r"confirm my appointment",
                            r"what time is my", r"\babout (my|that|the) (appointment|booking)")),
+    ("booking_status", (r"\b(did|have) you (book|made|make|schedule|confirm|set)", r"\bwhat (appointment|time|day) did you",
+                        r"\b(is|was) (it|my appointment|that) (booked|confirmed|scheduled)", r"\bhave i (got|been booked)")),
     ("book", (r"\bbook", r"\bappointment\b", r"\bschedule\b", r"\bmake an? (appointment|reservation)", r"\breserv",
               r"\bcome in\b", r"\bsee (the |a )?(doctor|dentist|hygienist|stylist)", r"\bavailab", r"\bopenings\b",
               r"\bany opening\b", r"\bslot\b", r"\bget (a|an|my) [a-z ]{0,20}(cleaning|haircut|exam|checkup|check up|consult|viewing|massage|visit)")),
@@ -66,7 +94,8 @@ AFFIRM = re.compile(r"^(yes|yeah|yep|yup|sure|correct|right|ok|okay|alright|all 
                     r"that's correct|that's fine|that is fine|that's good|that would be great|that'd be great|exactly|fine|"
                     r"uh huh|mhm|mm hmm|mmhmm|i think so|no problem|no worries|no that works|of course|book it|do it|confirm)\b")
 DENY = re.compile(r"^(no(?! problem\b| worries\b| that works\b)|nope|nah|not really|incorrect|wrong|that's wrong|that is wrong|"
-                  r"neither|none|not quite|actually no|wait|hold on|cancel that|that's not right|negative)\b")
+                  r"neither|none|not quite|actually no|wait|hold on|cancel that|that's not right|negative|"
+                  r"not(?= *$| (correct|right|it|that|the)\b))\b")
 GREETING = re.compile(r"^(hello|hi|hey|good (morning|afternoon|evening))( there)?$")
 HEARING_CHECK = re.compile(r"^((hello|hi|hey) )?(are you there|can you hear me|do you hear me)$")
 
@@ -82,17 +111,19 @@ HEALTH_EMERGENCY = (
 GENERAL_EMERGENCY = (r"\bemergency\b", r"\bfire\b", r"\bflood(ing)?\b", r"\bgas leak\b", r"\bsmell gas\b", r"\bburst pipe\b",
                      r"\bno heat\b", r"\bbreak in\b", r"\bbroken into\b", r"\bsmoke\b", r"\bcarbon monoxide\b")
 MEDICAL_ADVICE = (r"should i take", r"what (medication|medicine|pills?|antibiotics?)", r"\bdiagnos", r"is it normal",
-                  r"is (this|that|it) serious", r"what('s| is) wrong with", r"\bprescri", r"how (long|much) should i take")
+                  r"is (this|that|it) serious", r"what('s| is) wrong with", r"\bprescribe\b", r"\bprescribing\b", r"how (long|much) should i take")
 
 
 def detect_intents(text: str) -> list[str]:
-    t = norm(text)
+    t = norm(fix_mishearings(text))
     found = [name for name, pats in INTENT_PATTERNS if has(t, *pats)]
     # "book" + "cancel/reschedule" -> the specific action wins
     if "reschedule" in found or "cancel" in found:
         found = [f for f in found if f != "book"]
     if "check_appointment" in found:
         found = [f for f in found if f not in ("book", "hours")]
+    if "booking_status" in found:
+        found = [f for f in found if f not in ("book", "check_appointment")]
     if "book" in found and "hours" in found and not has(t, r"\bhours\b", r"what time do you", r"are you open"):
         found.remove("hours")
     return found
@@ -207,7 +238,8 @@ def _mk_time(h: int, m: int, ap: str) -> time | None:
 def parse_when(text: str, today: date) -> When:
     t = norm(text)
     w = When()
-    if has(t, r"\b(any ?time|whenever|earliest|first available|soonest|as soon as possible|asap|next available|don't mind|doesn't matter)\b"):
+    if has(t, r"\b(any ?time|whenever|earliest|first available|soonest|as soon as possible|asap|next available|don't mind|doesn't matter|"
+                r"as you (want|like|wish)|up to you|your choice|you choose|whatever (works|suits)|any day|no preference)\b"):
         w.flexible = True
     if has(t, r"\bmorning\b"):
         w.part_of_day = "morning"
@@ -361,7 +393,8 @@ NOT_NAMES = {"yes", "no", "okay", "ok", "sure", "hello", "hi", "hey", "um", "uh"
              "trying", "wondering", "interested", "here", "fine", "good", "great", "sorry", "just", "first", "second", "third",
              "last", "one", "two", "three", "option", "that", "this", "next", "tuesday", "monday", "wednesday", "thursday",
              "friday", "saturday", "sunday", "morning", "afternoon", "evening", "what", "can", "could", "would", "i",
-             "not", "nothing", "never", "perfect", "correct", "right", "wrong", "nope", "yeah", "yep"}
+             "not", "nothing", "never", "perfect", "correct", "right", "wrong", "nope", "yeah", "yep", "from", "is",
+             "called", "actually", "speaking", "well", "of", "its"}
 
 
 def extract_name(text: str, expecting: bool = False) -> str | None:
@@ -432,4 +465,24 @@ def kb_score(query: str, question: str, answer: str) -> float:
         return 0.0
     qq, aa = tokens(question), tokens(answer)
     s = len(q & qq) / max(1, len(q)) * 1.0 + len(q & aa) / max(1, len(q)) * 0.35
+    if len(answer) > 200:
+        # A passage from the business's website or a PDF: how much of the caller's question its text (and heading) covers.
+        hit = len(q & (aa | qq))
+        if hit >= 2:
+            s = max(s, hit / len(q) * 0.95)
     return s
+
+
+def best_sentences(answer: str, query: str, max_chars: int = 300) -> str:
+    """The part of a long saved answer that fits the question, kept short enough to say on the phone. Short answers are
+    returned as written; for long ones, only the best sentence and, if it fits, the one after it."""
+    if len(answer) <= max_chars:
+        return answer
+    sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", answer) if x.strip()]
+    q = tokens(query)
+    scored = [(len(q & tokens(x)), i) for i, x in enumerate(sentences)]
+    best = max(scored, key=lambda t: (t[0], -t[1]))[1] if scored and max(scored)[0] else 0
+    out = sentences[best]
+    if best + 1 < len(sentences) and len(out) + len(sentences[best + 1]) + 1 <= max_chars:
+        out = f"{out} {sentences[best + 1]}"
+    return out[:max_chars].rsplit(" ", 1)[0] + "." if len(out) > max_chars else out

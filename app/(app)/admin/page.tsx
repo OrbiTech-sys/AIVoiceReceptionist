@@ -1,6 +1,6 @@
 "use client";
 
-import { Download, Gauge, HardDrive, Trash2 } from "lucide-react";
+import { Check, Download, Gauge, HardDrive, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { useSession } from "@/components/session";
 import { useToast } from "@/components/toast";
@@ -23,6 +23,8 @@ export default function AdminPage() {
     me.user.is_platform_admin ? "/api/admin/models" : null, { poll: 2000 });
   const tenants = useApi<{ id: string; name: string; business_type: string; created_at: string; members: number; calls: number; appointments: number; is_demo: boolean; onboarding_completed: boolean }[]>(
     me.user.is_platform_admin ? "/api/admin/tenants" : null);
+  const messages = useApi<{ id: string; name: string; email: string; business: string; topic: string; message: string; created_at: string; handled: boolean }[]>(
+    me.user.is_platform_admin ? "/api/admin/contact-messages" : null);
   const [warm, setWarm] = useState(false);
 
   if (!me.user.is_platform_admin) return <EmptyState title="Platform administrators only" />;
@@ -84,6 +86,37 @@ export default function AdminPage() {
           );
         })}
       </div>
+
+      <Card className="mt-6" title="Website messages" description="Sent through the contact form on the public website.">
+        {!messages.data ? <Skeleton className="h-24" /> : messages.data.length === 0 ? (
+          <p className="text-[13px] text-muted">No messages yet.</p>
+        ) : (
+          <ul className="divide-y divide-border">
+            {messages.data.map((m) => (
+              <li key={m.id} className="py-3 first:pt-0 last:pb-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold">{m.name}</span>
+                  <a className="text-[13px] text-accent hover:underline" href={`mailto:${m.email}`}>{m.email}</a>
+                  {m.business && <span className="text-[13px] text-muted">{m.business}</span>}
+                  <Badge>{m.topic}</Badge>
+                  {m.handled ? <Badge tone="success">Handled</Badge> : <Badge tone="warning">New</Badge>}
+                  <span className="text-xs text-subtle">{relTime(m.created_at)}</span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap text-[13px] text-muted">{m.message}</p>
+                <div className="mt-2 flex gap-2">
+                  <Button size="sm" icon={<Check className="size-4" />} onClick={async () => {
+                    try { await api(`/api/admin/contact-messages/${m.id}`, { method: "PATCH", body: { handled: !m.handled } }); messages.reload(true); } catch (e) { toast.error(errorMessage(e)); }
+                  }}>{m.handled ? "Mark as new" : "Mark as handled"}</Button>
+                  <Button size="sm" variant="danger" icon={<Trash2 className="size-4" />} onClick={async () => {
+                    if (!confirm(`Delete the message from ${m.name}? This can't be undone.`)) return;
+                    try { await api(`/api/admin/contact-messages/${m.id}`, { method: "DELETE" }); messages.reload(true); } catch (e) { toast.error(errorMessage(e)); }
+                  }}>Delete</Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
 
       <Card className="mt-6" title="Businesses">
         {!tenants.data ? <Skeleton className="h-24" /> : (

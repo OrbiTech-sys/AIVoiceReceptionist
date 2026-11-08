@@ -20,8 +20,10 @@ from ..deps import SESSION_COOKIE, TenantContext, load_session, require_owner, r
 from ..errors import AppError
 from ..models import Membership, ReceptionistSettings
 from ..ratelimit import limiter
+from ..services import fish_voices
+from ..services.fish_voices import tenant_voice_id
 from ..voice import runtime
-from ..voice.engines import KOKORO_VOICES, float_to_pcm16, pcm16_to_float
+from ..voice.engines import FISH_VOICES, KOKORO_VOICES, PIPER_VOICES, float_to_pcm16, pcm16_to_float
 from ..voice.session import CallSession
 
 log = logging.getLogger("voicerep.ws")
@@ -54,14 +56,17 @@ def get_settings_api(ctx: TenantContext = Depends(require_tenant), db: Session =
         s = ReceptionistSettings(tenant_id=ctx.tenant_id)
         db.add(s)
         db.commit()
-    return {**settings_out(s), "voices": runtime.available_voices(), "readiness": runtime.readiness()}
+    out = settings_out(s)
+    out["voice_id"] = runtime.effective_voice(out["voice_id"])  # shown as the voice that will really be used
+    return {**out, "voices": runtime.available_voices(), "readiness": runtime.readiness()}
 
 
 @router.put("")
 def put_settings(body: SettingsIn, ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
-    if body.voice_id not in {v.id for v in KOKORO_VOICES}:
+    known = (*KOKORO_VOICES, *PIPER_VOICES, *FISH_VOICES)
+    if body.voice_id not in {v.id for v in known} and not tenant_voice_id(body.voice_id):
         raise AppError("Unknown voice.", code="invalid_voice")
-    if body.language not in {v.language for v in KOKORO_VOICES}:
+    if body.language not in {v.language for v in known}:
         raise AppError("That language is not supported by the installed models.", code="invalid_language")
     if body.transfer_number:
         from ..security import normalize_phone
@@ -78,6 +83,39 @@ def put_settings(body: SettingsIn, ctx: TenantContext = Depends(require_owner), 
     return settings_out(s)
 
 
+@router.get("/fish-voices")
+async def browse_fish_voices(q: str = Query("", max_length=60), gender: str = Query("", pattern="^(female|male)?$"),
+                             page: int = Query(1, ge=1, le=50), ctx: TenantContext = Depends(require_tenant)):
+    """Fish Audio's public English voices (with free sample clips), for the Voices page."""
+    limiter.check(f"fish-browse:{ctx.tenant_id}", 60, 60)
+    return await asyncio.get_running_loop().run_in_executor(None, fish_voices.search, q, gender, page)
+
+
+class VoiceChoice(BaseModel):
+    voice_id: str = Field(max_length=40)
+
+
+@router.get("/fish-voices/current")
+async def current_fish_voice(ctx: TenantContext = Depends(require_tenant), db: Session = Depends(get_db)):
+    s = db.get(ReceptionistSettings, ctx.tenant_id)
+    fish_id = tenant_voice_id(s.voice_id) if s else None
+    if fish_id is None:
+        return {"voice": None, "default_id": get_settings().fish_voice_id}
+    return {"voice": await asyncio.get_running_loop().run_in_executor(None, fish_voices.one, fish_id)}
+
+
+@router.put("/voice")
+def choose_voice(body: VoiceChoice, ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
+    """Pick the receptionist's voice without touching its other settings."""
+    if not tenant_voice_id(body.voice_id):
+        raise AppError("Unknown voice.", code="invalid_voice")
+    s = db.get(ReceptionistSettings, ctx.tenant_id) or ReceptionistSettings(tenant_id=ctx.tenant_id)
+    s.voice_id = body.voice_id
+    db.add(s)
+    db.commit()
+    return {"voice_id": s.voice_id}
+
+
 @router.get("/readiness")
 def readiness(ctx: TenantContext = Depends(require_tenant)):
     return runtime.readiness()
@@ -87,8 +125,9 @@ def readiness(ctx: TenantContext = Depends(require_tenant)):
 async def preview(voice_id: str, text: str = Query("", max_length=200), speed: float = Query(1.0, ge=0.8, le=1.25),
                   ctx: TenantContext = Depends(require_tenant)):
     limiter.check(f"preview:{ctx.tenant_id}", 30, 60)
-    if voice_id not in {v.id for v in KOKORO_VOICES}:
+    if voice_id not in {v.id for v in (*KOKORO_VOICES, *PIPER_VOICES, *FISH_VOICES)} and not tenant_voice_id(voice_id):
         raise AppError("Unknown voice.", code="invalid_voice")
+    voice_id = runtime.effective_voice(voice_id)
     tts = await asyncio.get_running_loop().run_in_executor(None, runtime.get_tts)
     if tts is None:
         raise AppError("The voice model is not installed yet. Ask your administrator to install it.", code="tts_missing",
@@ -146,6 +185,8 @@ async def demo_ws(ws: WebSocket):
     transport = BrowserTransport(ws)
     call = CallSession(tenant_id, transport, channel="browser_demo", is_demo=True)
     reason = "hangup"
+    recv: asyncio.Task | None = None
+    end_wait: asyncio.Task | None = None
     try:
         await call.start()
         end_wait = asyncio.create_task(call.end_requested.wait())
@@ -182,6 +223,10 @@ async def demo_ws(ws: WebSocket):
         call._failed = f"{type(exc).__name__}"
         reason = "error"
     finally:
+        # Left running, these get garbage-collected and asyncio logs "Task was destroyed but it is pending!".
+        for task in (recv, end_wait):
+            if task is not None:
+                task.cancel()
         _active_demo[tenant_id] = max(0, _active_demo.get(tenant_id, 1) - 1)
         await call.close(reason)
         try:

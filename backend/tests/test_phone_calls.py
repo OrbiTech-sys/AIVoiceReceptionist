@@ -124,6 +124,26 @@ def test_call_ended_by_the_receptionist_hangs_up_and_is_recorded(owner, monkeypa
         assert call.status == "completed" and call.outcome == "missed" and call.ended_at is not None
 
 
+def test_caller_hanging_up_leaves_nothing_waiting(owner, monkeypatch):
+    tenant_id, integ_id = _tenant_with_integration(owner)
+    monkeypatch.setattr(runtime, "get_tts", lambda: FakeTTS())
+
+    async def scenario():
+        port = _free_port()
+        adapter = AudioSocketAdapter("127.0.0.1", port)
+        await adapter.start()
+        _, rd, wr = await _connect(port, tenant_id, integ_id)
+        wr.write(frame(KIND_HANGUP))
+        await wr.drain()
+        await _audio_until_hangup(rd)  # the adapter sends its own hang-up frame after cleaning up
+        left_waiting = [t for t in asyncio.all_tasks() if t.get_coro().__qualname__ == "Event.wait"]
+        wr.close()
+        await adapter.stop()
+        return left_waiting
+
+    assert asyncio.run(scenario()) == []
+
+
 def test_transfer_request_reaches_the_dialplan(owner, monkeypatch):
     tenant_id, integ_id = _tenant_with_integration(owner)
     with SessionLocal() as db:

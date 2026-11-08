@@ -70,7 +70,8 @@ def make_engine(url: str) -> Engine:
             conn.exec_driver_sql("BEGIN IMMEDIATE")
 
         return engine
-    return create_engine(url, pool_pre_ping=True, pool_size=10, max_overflow=20)
+    s = get_settings()
+    return create_engine(url, pool_pre_ping=True, pool_size=s.db_pool_size, max_overflow=s.db_max_overflow)
 
 
 _engine: Engine | None = None

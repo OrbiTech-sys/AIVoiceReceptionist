@@ -166,6 +166,8 @@ class AudioSocketAdapter:
         call: CallSession | None = None
         transport: AudioSocketTransport | None = None
         call_uuid = ""
+        rd: asyncio.Task | None = None
+        end_wait: asyncio.Task | None = None
         try:
             kind, payload = await asyncio.wait_for(read_frame(reader), timeout=5)
             if kind != KIND_UUID or len(payload) != 16:
@@ -206,6 +208,10 @@ class AudioSocketAdapter:
             if call is not None:
                 call._failed = f"Telephony error: {type(exc).__name__}"
         finally:
+            # Left running, these get garbage-collected and asyncio logs "Task was destroyed but it is pending!".
+            for task in (rd, end_wait):
+                if task is not None:
+                    task.cancel()
             if call is not None:
                 if call_uuid and call.next_action == "transfer" and call.dialog and call.dialog.snap.transfer_number:
                     registry.set_action(call_uuid, f"transfer:{call.dialog.snap.transfer_number}")

@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { BookOpen, Globe, Pencil, Plus, Trash2, Upload } from "lucide-react";
 import { useRef, useState } from "react";
 import { useToast } from "@/components/toast";
 import { Badge, Button, EmptyState, ErrorNote, Field, Input, Modal, Select, Skeleton, Textarea } from "@/components/ui";
@@ -10,6 +10,11 @@ import { useApi } from "@/lib/hooks";
 interface Entry { id: string; kind: string; question: string; answer: string; is_active: boolean }
 const KINDS: Record<string, string> = { faq: "FAQ", policy: "Policy", directions: "Directions", general: "General" };
 
+function importMessage(r: { imported: number; skipped?: number }) {
+  const skipped = r.skipped ? ` (${r.skipped} already saved)` : "";
+  return `Added ${r.imported} ${r.imported === 1 ? "entry" : "entries"}${skipped}`;
+}
+
 export function KnowledgeEditor() {
   const toast = useToast();
   const { data, error, loading, reload } = useApi<Entry[]>("/api/knowledge");
@@ -17,6 +22,8 @@ export function KnowledgeEditor() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const file = useRef<HTMLInputElement>(null);
+  const [site, setSite] = useState("");
+  const [reading, setReading] = useState(false);
 
   const save = async () => {
     if (!edit?.question?.trim() || !edit.answer?.trim()) return setErr("Enter both a question and an answer.");
@@ -39,8 +46,8 @@ export function KnowledgeEditor() {
     const fd = new FormData();
     fd.append("file", f);
     try {
-      const r = await api<{ imported: number }>("/api/knowledge/import", { body: fd });
-      toast.success(`Imported ${r.imported} entries`);
+      const r = await api<{ imported: number; skipped?: number }>("/api/knowledge/import", { body: fd });
+      toast.success(importMessage(r));
       reload(true);
     } catch (e) {
       toast.error(errorMessage(e));
@@ -49,14 +56,47 @@ export function KnowledgeEditor() {
     }
   };
 
+  const importSite = async () => {
+    if (!site.trim()) return;
+    setReading(true);
+    try {
+      const r = await api<{ imported: number; skipped: number; pages: number }>("/api/knowledge/import-url", { body: { url: site.trim() } });
+      toast.success(`${importMessage(r)} from ${r.pages} ${r.pages === 1 ? "page" : "pages"}`);
+      setSite("");
+      reload(true);
+    } catch (e) {
+      toast.error(errorMessage(e));
+    } finally {
+      setReading(false);
+    }
+  };
+
   return (
     <div>
+      <form
+        className="mb-3 flex flex-wrap items-center gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          importSite();
+        }}
+      >
+        <Input
+          aria-label="Your website address"
+          className="min-w-0 flex-1"
+          placeholder="https://yourbusiness.com — read my website"
+          value={site}
+          onChange={(e) => setSite(e.target.value)}
+        />
+        <Button size="sm" type="submit" icon={<Globe className="size-4" />} loading={reading} disabled={!site.trim()}>
+          Read website
+        </Button>
+      </form>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <p className="text-[13px] text-muted">The receptionist answers only from these entries, your hours, address and services.</p>
         <div className="flex gap-2">
-          <input ref={file} type="file" accept=".csv,.txt,text/csv,text/plain" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
-          <Button size="sm" icon={<Upload className="size-4" />} onClick={() => file.current?.click()} title="CSV with question,answer columns or TXT with Q:/A: lines">
-            Import CSV/TXT
+          <input ref={file} type="file" accept=".csv,.txt,.pdf,text/csv,text/plain,application/pdf" hidden onChange={(e) => e.target.files?.[0] && importFile(e.target.files[0])} />
+          <Button size="sm" icon={<Upload className="size-4" />} onClick={() => file.current?.click()} title="PDF, CSV with question,answer columns, or TXT with Q:/A: lines">
+            Import PDF/CSV/TXT
           </Button>
           <Button size="sm" variant="primary" icon={<Plus className="size-4" />} onClick={() => setEdit({ kind: "faq" })}>
             Add entry
@@ -100,7 +140,10 @@ export function KnowledgeEditor() {
           <EmptyState icon={<BookOpen className="size-5" />} title="No knowledge yet" description="Add common questions — insurance, parking, what to bring — so callers get accurate answers." />
         </div>
       )}
-      <p className="mt-2 text-xs text-subtle">CSV format: <code>question,answer</code>. TXT format: lines starting with <code>Q:</code> and <code>A:</code>, separated by blank lines. Max 200 KB.</p>
+      <p className="mt-2 text-xs text-subtle">
+        Reading a website or PDF saves its text as short passages that the receptionist quotes, so check them and delete anything you don&apos;t want said on calls. Pages that need JavaScript to show text and scanned PDFs can&apos;t be read.
+      </p>
+      <p className="mt-1 text-xs text-subtle">CSV format: <code>question,answer</code>. TXT format: lines starting with <code>Q:</code> and <code>A:</code>, separated by blank lines. Max 200 KB.</p>
 
       <Modal
         open={!!edit}

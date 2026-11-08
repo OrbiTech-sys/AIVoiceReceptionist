@@ -305,3 +305,75 @@ def test_real_emergencies_are_recognised(line):
 @pytest.mark.parametrize("line", ["Do you do emergency appointments?", "Do you see emergency patients on weekends?", "Do you offer emergency care?"])
 def test_asking_about_emergency_services_is_not_an_emergency(line):
     assert not nlu.is_emergency(line, True)
+
+
+# ------------------------------------------------------------------ second test call (2026-11-06)
+FRIDAY_NOON = datetime(2026, 11, 6, 17, 0, tzinfo=timezone.utc)  # 12 PM in New York
+
+
+class ThreeSlotTools(OneSlotTools):
+    def find_slots(self, service_id, when, limit=3, exclude_appointment_id=None):
+        # 9 AM in New York: tomorrow (Saturday), Monday and Tuesday
+        return [SlotOption(datetime(2026, 11, d, 14, 0, tzinfo=timezone.utc), None, None) for d in (7, 9, 10)]
+
+
+def _second_call() -> tuple[Receptionist, ThreeSlotTools]:
+    tools = ThreeSlotTools()
+    return Receptionist(snapshot(services=SERVICES, kb=KB), tools, now=FRIDAY_NOON), tools
+
+
+def test_second_call_replayed_ends_in_a_booking():
+    r, tools = _second_call()
+    assert "May I have your name" in r.handle("Can I talk to the doctor?", 0.78).text
+    # "from" is not a name, and a name heard with low confidence is checked
+    assert r.handle("Yeah, my name is from Hij.", 0.33).text == "I have your name as Hij. Is that right?"
+    assert "What's the best number" in r.handle("Yes.", 0.9).text
+    assert "2 1 2, 7 8 7, 4 1 2 8" in r.handle("It's 2, 1, 2, 7, 8, 7, 4, 1, 2, 8.", 0.78).text
+    # Confirming the number and asking to book switches to booking instead of asking what to call about
+    reply = r.handle("Yes, it's correct. I want to book an appointment. Can you make one?", 0.89).text
+    assert "What would you like to come in for" in reply
+    assert r.handle("Consultation.", 0.56).text == "Great, a consultation. Do you have a preferred day or time?"
+    offer = r.handle("No police is your hand.", 0.19).text
+    assert offer == "I have 9 AM tomorrow, Monday, or Tuesday. Which works best for you?"
+    assert r.handle("Pull in the T-shirt and check out the code.", 0.2).text.startswith("Sorry, the line wasn't clear.")
+    assert r.handle("I'm going to go to the end of the video.", 0.2).text.startswith("Sorry, the line wasn't clear.")
+    # Wanting to book, without saying which time, offers the times again rather than giving up
+    assert r.handle("Yeah, I want to book it forward.", 0.73).text == \
+        "Sure. I have 9 AM tomorrow, Monday, or Tuesday. Which one would you like?"
+    # Name and number are already known, so it goes straight to the confirmation
+    confirm = r.handle("I want to work it for 9am Monday.", 0.77).text
+    assert confirm == "Let me confirm: a consultation Monday, November 9th at 9 AM, for Hij. Shall I book that for you?"
+    assert "You're all set" in r.handle("Yes.", 0.9).text
+    assert tools.booked == [("consult", "Hij", "+12127874128")]
+    assert tools.callbacks == []
+
+
+def test_giving_up_on_a_booking_does_not_ask_for_the_number_again():
+    r, tools = _second_call()
+    r.handle("Can I talk to the doctor?")
+    r.handle("My name is Sara Khan.")
+    r.handle("2 1 2 7 8 7 4 1 2 8")
+    r.handle("Yes, and I'd like to book a consultation.")
+    r.handle("Any time.")
+    for garbled in ("Pull in the T-shirt.", "End of the video.", "Purple monkey dishwasher."):
+        reply = r.handle(garbled, 0.2).text
+    assert "I haven't booked anything yet" in reply
+    assert "number" not in reply  # it already has one
+    assert tools.callbacks and tools.callbacks[-1][:2] == ("Sara Khan", "+12127874128")
+    assert tools.booked == []
+
+
+def test_times_on_different_days_are_offered_briefly():
+    r, _ = _second_call()
+    r.handle("I'd like to book a consultation.")
+    assert r.handle("Whenever suits.").text == "I have 9 AM tomorrow, Monday, or Tuesday. Which works best for you?"
+
+
+def test_leaving_a_message_can_turn_into_a_booking():
+    r, tools = _second_call()
+    r.handle("Can someone call me back?")
+    r.handle("This is Sara Khan.")
+    r.handle("2 1 2 7 8 7 4 1 2 8")
+    r.handle("Yes.")
+    assert "Do you have a preferred day" in r.handle("Actually, can I book a consultation?").text
+    assert r.flow == "book"

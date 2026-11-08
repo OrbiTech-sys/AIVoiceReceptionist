@@ -2,6 +2,7 @@
 
 import {
   Bell,
+  AudioLines,
   Bot,
   Building2,
   CalendarDays,
@@ -29,6 +30,7 @@ const NAV = [
   { href: "/appointments", label: "Appointments", icon: CalendarDays },
   { href: "/contacts", label: "Contacts", icon: Users },
   { href: "/receptionist", label: "AI Receptionist", icon: Bot },
+  { href: "/voices", label: "Voices", icon: AudioLines },
   { href: "/notifications", label: "Notifications", icon: Bell },
   { href: "/settings", label: "Business Settings", icon: Building2 },
   { href: "/integrations", label: "Integrations", icon: Plug },

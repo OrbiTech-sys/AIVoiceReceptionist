@@ -1,6 +1,7 @@
-"""Services, staff (with availability) and knowledge base, including CSV/TXT import."""
+"""Services, staff (with availability) and knowledge base, including CSV/TXT/PDF and website import."""
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 
@@ -14,6 +15,8 @@ from ..db import get_db
 from ..deps import TenantContext, require_owner, require_tenant
 from ..errors import AppError, Conflict, NotFound
 from ..models import Appointment, KnowledgeEntry, Service, StaffAvailability, StaffMember, StaffService
+from ..ratelimit import limiter
+from ..services import knowledge_import
 from .common import parse_hhmm, service_out, staff_out
 
 router = APIRouter(prefix="/api", tags=["catalog"])
@@ -242,11 +245,47 @@ def parse_knowledge_file(filename: str, raw: bytes) -> list[tuple[str, str]]:
     return pairs
 
 
+MAX_PDF_BYTES = 5_000_000
+
+
+def _save_passages(db: Session, tenant_id: str, entries: list[tuple[str, str]]) -> dict:
+    """Store imported passages, skipping any the business already has. Returns how many were added and skipped."""
+    have = {(k.question, k.answer) for k in db.scalars(select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tenant_id))}
+    added = 0
+    for q, a in entries:
+        if (q, a) in have:
+            continue
+        db.add(KnowledgeEntry(tenant_id=tenant_id, kind="general", question=q, answer=a))
+        added += 1
+    db.commit()
+    return {"imported": added, "skipped": len(entries) - added}
+
+
 @router.post("/knowledge/import")
 async def import_kb(file: UploadFile = File(...), ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
+    name = (file.filename or "").lower()
+    if name.endswith(".pdf"):
+        raw = await file.read(MAX_PDF_BYTES + 1)
+        if len(raw) > MAX_PDF_BYTES:
+            raise AppError("That PDF is too large (max 5 MB).", code="file_too_large")
+        if not raw.startswith(b"%PDF-"):
+            raise AppError("That file isn't a PDF.", code="invalid_file")
+        entries = await asyncio.get_running_loop().run_in_executor(None, knowledge_import.import_pdf, raw)
+        return _save_passages(db, ctx.tenant_id, entries)
     raw = await file.read(MAX_IMPORT_BYTES + 1)
     pairs = parse_knowledge_file(file.filename or "", raw)
     for q, a in pairs:
         db.add(KnowledgeEntry(tenant_id=ctx.tenant_id, kind="faq", question=q, answer=a))
     db.commit()
-    return {"imported": len(pairs)}
+    return {"imported": len(pairs), "skipped": 0}
+
+
+class WebsiteIn(BaseModel):
+    url: str = Field(min_length=4, max_length=500)
+
+
+@router.post("/knowledge/import-url")
+async def import_website_kb(body: WebsiteIn, ctx: TenantContext = Depends(require_owner), db: Session = Depends(get_db)):
+    limiter.check(f"kb-import:{ctx.tenant_id}", 6, 600)
+    entries, pages = await asyncio.get_running_loop().run_in_executor(None, knowledge_import.import_website, body.url)
+    return {**_save_passages(db, ctx.tenant_id, entries), "pages": pages}

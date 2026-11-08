@@ -16,8 +16,10 @@ from ..services.delivery import email_configured
 from ..telephony import base
 from ..voice import models_manager as mm
 from ..voice import runtime
+from . import contact
 
 router = APIRouter(prefix="/api", tags=["system"])
+router.include_router(contact.router)
 
 
 @router.get("/health")

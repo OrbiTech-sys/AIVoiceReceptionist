@@ -14,6 +14,17 @@ import type { Readiness } from "@/lib/types";
 
 type Tab = "test" | "voice" | "knowledge" | "safety";
 
+const MODEL_NAMES: Record<string, string> = {
+  "deepgram-nova-3": "Deepgram Nova-3 (online service)",
+  "asr-parakeet-tdt-0.6b-v2": "NVIDIA Parakeet (this server)",
+  "asr-base.en": "Whisper base.en (this server)",
+  "asr-tiny.en": "Whisper tiny.en (this server)",
+  "asr-small.en": "Whisper small.en (this server)",
+  "tts-piper": "Piper (this server)",
+  "tts-kokoro": "Kokoro-82M (this server)",
+  "tts-fish": "Fish Audio (online service)",
+};
+
 function ModelStatus({ r }: { r?: Readiness }) {
   const row = (label: string, ok: boolean | undefined, detail: string, ms?: number | null) => (
     <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
@@ -25,15 +36,18 @@ function ModelStatus({ r }: { r?: Readiness }) {
     </div>
   );
   return (
-    <Card title={<span className="flex items-center gap-2"><Cpu className="size-4" /> Local AI models</span>} description="All speech processing runs on your server. No paid AI APIs.">
+    <Card title={<span className="flex items-center gap-2"><Cpu className="size-4" /> AI models</span>} description="Each part runs on this server or uses an online service, as set in your server settings (.env).">
       {!r ? <p className="text-[13px] text-muted">Checking…</p> : (
         <div className="divide-y divide-border">
-          {row("Speech recognition", r.asr.ready, r.asr.model?.replace("asr-", "Whisper ") ?? "faster-whisper", r.asr.latency_ms)}
+          {row("Speech recognition", r.asr.ready, MODEL_NAMES[r.asr.model ?? ""] ?? r.asr.model ?? "—", r.asr.latency_ms)}
           {row("Voice activity detection", r.vad.ready, r.vad.model === "silero" ? "Silero VAD" : "Energy fallback")}
-          {row("Text-to-speech", r.tts.ready, "Kokoro-82M", r.tts.latency_ms)}
+          {row("Text-to-speech", r.tts.ready, MODEL_NAMES[r.tts.model ?? ""] ?? r.tts.model ?? "—", r.tts.latency_ms)}
           <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
-            <span className="text-muted">Language model (optional)</span>
-            <Badge tone={r.llm.ready ? "success" : "neutral"}>{r.llm.ready ? "Ready" : r.llm.configured ? "Unreachable" : "Not used"}</Badge>
+            <span className="text-muted">Understanding unclear sentences (optional)</span>
+            <span className="flex items-center gap-2 text-right">
+              {r.llm.ready && <span className="text-xs text-subtle">{r.llm.provider === "groq" ? "Groq (online service)" : "Local model"}</span>}
+              <Badge tone={r.llm.ready ? "success" : "neutral"}>{r.llm.ready ? "Ready" : r.llm.configured ? "Unreachable" : "Not used"}</Badge>
+            </span>
           </div>
         </div>
       )}

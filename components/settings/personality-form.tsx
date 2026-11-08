@@ -1,6 +1,7 @@
 "use client";
 
 import { Pause, Play } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useToast } from "@/components/toast";
 import { Badge, Button, ErrorNote, Field, Input, Select, Skeleton, Switch, Textarea } from "@/components/ui";
@@ -76,6 +77,7 @@ export function PersonalityForm({ submitLabel = "Save receptionist", onSaved, co
   if (!f) return <Skeleton className="h-96" />;
 
   const voices = f.voices;
+  const readinessFish = f.readiness?.tts.model === "tts-fish";
   const languages = Array.from(new Set(voices.map((v) => v.language)));
   const set = <K extends keyof RecSettings>(k: K, v: RecSettings[K]) => setF({ ...f, [k]: v });
   const save = async () => {
@@ -126,7 +128,9 @@ export function PersonalityForm({ submitLabel = "Save receptionist", onSaved, co
               <option key={v.id} value={v.id}>{v.label} · {v.gender}</option>
             ))}
             {!voices.length && <option value={f.voice_id}>Not installed</option>}
+            {f.voice_id.startsWith("fish:") && <option value={f.voice_id}>Chosen on the Voices page</option>}
           </Select>
+          {readinessFish && <Link href="/voices" className="mt-1 inline-block text-[13px] text-accent hover:underline">Browse Fish Audio voices →</Link>}
         </Field>
         <Field label="Speaking style" htmlFor="r-style">
           <Select id="r-style" value={f.style} onChange={(e) => set("style", e.target.value)}>

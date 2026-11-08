@@ -291,6 +291,30 @@ def test_browser_demo_conversation_end_to_end(owner):
     assert any(e["kind"] == "caller" and "dental cleaning" in e["text"] for e in detail["events"])
 
 
+def test_browser_call_leaves_nothing_waiting_after_the_caller_hangs_up(owner, monkeypatch):
+    end_waits: list[asyncio.Task] = []
+    real_create_task = asyncio.create_task
+
+    def recording_create_task(coro, **kwargs):
+        task = real_create_task(coro, **kwargs)
+        if getattr(coro, "__qualname__", "") == "Event.wait":
+            end_waits.append(task)
+        return task
+
+    monkeypatch.setattr(asyncio, "create_task", recording_create_task)
+    cookie = f"vr_session={owner.c.cookies.get('vr_session')}"
+    with owner.c.websocket_connect("/api/receptionist/ws", headers={"origin": "http://localhost:3000", "cookie": cookie}) as ws:
+        _recv_until(ws, lambda e: e["type"] == "ready")
+        ws.send_text(json.dumps({"type": "hangup"}))
+        for _ in range(60):
+            if ws.receive()["type"] == "websocket.close":
+                break
+        else:
+            raise AssertionError("the server never closed the socket")
+        # Checked here because shutting down the test client's event loop cancels anything still waiting.
+        assert end_waits and all(t.done() or t.cancelling() for t in end_waits)
+
+
 def test_demo_websocket_rejects_foreign_origin_and_anonymous(owner):
     import pytest
     from starlette.websockets import WebSocketDisconnect

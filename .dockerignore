@@ -3,3 +3,5 @@ node_modules
 backend/.venv
 backend/data
 .git
+# Secrets stay out of the images; docker compose passes the values each container needs.
+.env*

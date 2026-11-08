@@ -61,7 +61,31 @@ def _whisper(variant: str, model_sha: str, model_size: int, cfg_sha1: str, cfg_s
     )
 
 
+PARAKEET_REV = f"{HF}/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/0bbb45a3365852604aef28b538a8f066f4ccaa85"
+PARAKEET_DIR = "asr/parakeet-tdt-0.6b-v2"
+PIPER_REV = f"{HF}/rhasspy/piper-voices/resolve/e7229f7d33a10e145e109b886d661984201ac3c4/en/en_US"
+
 CATALOG: dict[str, ModelSpec] = {
+    "asr-parakeet-tdt-0.6b-v2": ModelSpec(
+        "asr-parakeet-tdt-0.6b-v2", "asr", "NVIDIA Parakeet TDT 0.6B v2 (ONNX, int8)",
+        "Most accurate English recognition here, including accented speech. Its work grows with the length of what the "
+        "caller says (Whisper always processes 30 seconds), so short replies are recognised 2–4× faster than Whisper base.en.",
+        "CC-BY-4.0 (weights: NVIDIA) · onnx-asr MIT",
+        (
+            # The encoder is listed first: the runtime loads the model from that file's folder.
+            FileSpec(f"{PARAKEET_REV}/encoder-model.int8.onnx", f"{PARAKEET_DIR}/encoder-model.int8.onnx", 652184014,
+                     sha256="3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155"),
+            FileSpec(f"{PARAKEET_REV}/decoder_joint-model.int8.onnx", f"{PARAKEET_DIR}/decoder_joint-model.int8.onnx", 8998286,
+                     sha256="a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3"),
+            FileSpec(f"{PARAKEET_REV}/nemo128.onnx", f"{PARAKEET_DIR}/nemo128.onnx", 139764,
+                     sha256="a9fde1486ebfcc08f328d75ad4610c67835fea58c73ba57e3209a6f6cf019e9f"),
+            FileSpec(f"{PARAKEET_REV}/vocab.txt", f"{PARAKEET_DIR}/vocab.txt", 9384,
+                     git_sha1="f0742785f6073e80b911964c455b05f3609bf23b"),
+            FileSpec(f"{PARAKEET_REV}/config.json", f"{PARAKEET_DIR}/config.json", 97,
+                     git_sha1="02a773005666393de591dfd55230b778da1653d8"),
+        ), 4.0,
+        notes="Select it with VR_ASR_MODEL=parakeet-tdt-0.6b-v2. Uses about 1.5 GB more RAM than Whisper base.en."),
+
     "asr-tiny.en": ModelSpec(
         "asr-tiny.en", "asr", "Whisper tiny.en (faster-whisper, int8)", "Fastest English speech recognition; lower accuracy.",
         "MIT (weights: OpenAI Whisper, MIT)",
@@ -77,6 +101,21 @@ CATALOG: dict[str, ModelSpec] = {
         "MIT (weights: OpenAI Whisper, MIT)",
         _whisper("small.en", "62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a", 483545366,
                  "ced3fd5bbb3e9f7664658065d2d36164712cf1d5", 2657), 3.0),
+    "tts-piper": ModelSpec(
+        "tts-piper", "tts", "Piper voices: Kristin and Joe (ONNX)",
+        "Fast voices that start speaking within a fraction of a second, even on a laptop. Plainer than Kokoro.",
+        "Voices: Kristin public domain (LibriVox recordings), Joe CC0 · Piper engine GPL-3.0-or-later (see README)",
+        (
+            FileSpec(f"{PIPER_REV}/kristin/medium/en_US-kristin-medium.onnx", "tts/piper/en_US-kristin-medium.onnx",
+                     63531379, sha256="5849957f929cbf720c258f8458692d6103fff2f0e3d3b19c8259474bb06a18d4"),
+            FileSpec(f"{PIPER_REV}/kristin/medium/en_US-kristin-medium.onnx.json", "tts/piper/en_US-kristin-medium.onnx.json",
+                     4968, git_sha1="e94be84ab0dc3532b4b2b48cbb1f5d4a8746bedd"),
+            FileSpec(f"{PIPER_REV}/joe/medium/en_US-joe-medium.onnx", "tts/piper/en_US-joe-medium.onnx",
+                     63201294, sha256="58afce0321b8d9c46d7cdf9c16500cc55a793b4220212dba6b70fb788b3baf06"),
+            FileSpec(f"{PIPER_REV}/joe/medium/en_US-joe-medium.onnx.json", "tts/piper/en_US-joe-medium.onnx.json",
+                     4794, git_sha1="b4ab600fbd71cee986a8e7714bd88996f33be945"),
+        ), 1.0,
+        notes="Select it with VR_TTS_ENGINE=piper."),
     "tts-kokoro": ModelSpec(
         "tts-kokoro", "tts", "Kokoro-82M v1.0 (ONNX)", "Natural neural voices, faster than real time on a modern CPU. English (US/UK).",
         "Apache-2.0 (weights) · kokoro-onnx MIT · espeak-ng GPL-3.0 (phonemizer library, see README)",
@@ -258,7 +297,7 @@ def auto_install() -> list[str]:
     clicks. Idempotent: models that are already installed and verified are left alone, and a download
     that is already running is not started twice. Models the server has too little RAM for are skipped
     (the admin screen still explains why). Returns the ids whose download was started."""
-    wanted = [f"asr-{get_settings().asr_model}", "tts-kokoro"]
+    wanted = [f"asr-{get_settings().asr_model}", f"tts-{get_settings().tts_engine}"]
     ram_gb = hardware()["ram_gb"]
     started: list[str] = []
     for mid in wanted:
@@ -288,9 +327,19 @@ def remove(model_id: str) -> None:
     runtime.reset_component(spec.component)
 
 
+def installed_tts() -> str | None:
+    """The voice model to use: the chosen engine if it is installed, else the other one."""
+    preferred = f"tts-{get_settings().tts_engine}"
+    for mid in (preferred, "tts-kokoro", "tts-piper"):
+        if mid in CATALOG and is_installed(mid):
+            return mid
+    return None
+
+
 def installed_asr() -> str | None:
     preferred = f"asr-{get_settings().asr_model}"
-    order = [preferred] + [m for m in ("asr-base.en", "asr-tiny.en", "asr-small.en") if m != preferred]
+    fallback = ("asr-base.en", "asr-tiny.en", "asr-small.en", "asr-parakeet-tdt-0.6b-v2")
+    order = [preferred] + [m for m in fallback if m != preferred]
     for mid in order:
         if mid in CATALOG and is_installed(mid):
             return mid

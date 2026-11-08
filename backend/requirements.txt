@@ -7,14 +7,17 @@ faster-whisper==1.2.1
 httpx==0.28.1
 kokoro-onnx==0.6.1
 numpy==2.5.4
+onnx-asr==0.12.0
 onnxruntime==1.31.1
 phonenumbers==9.0.42
+piper-tts==1.8.0
 psycopg[binary]==3.3.6
 py-vapid==1.9.6
 pydantic==2.14.1
 pydantic-settings==2.16.2
 pytest==9.2.0
 python-dateutil==3.0.0
+pypdf==6.21.4
 python-multipart==0.0.32
 pywebpush==2.5.0
 soxr==1.1.0

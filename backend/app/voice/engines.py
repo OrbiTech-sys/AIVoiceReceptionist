@@ -4,6 +4,8 @@ Each engine is independent and replaceable. All audio inside the pipeline is mon
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 import threading
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import httpx
 import numpy as np
 import soxr
 
@@ -213,6 +216,107 @@ class FasterWhisperASR:
         return Transcript(text, conf, int((time.perf_counter() - t0) * 1000))
 
 
+class ParakeetASR:
+    """NVIDIA Parakeet TDT 0.6B v2 (ONNX, int8) through onnx-asr. Whisper always processes a 30-second window, so even
+    "yes" costs the full amount; Parakeet's work grows with the length of the speech. It is also more accurate,
+    especially on accented English. It takes no prompt, so hints are ignored."""
+
+    MODEL = "nemo-parakeet-tdt-0.6b-v2"
+
+    def __init__(self, model_dir: Path, threads: int = 4):
+        import onnx_asr
+        import onnxruntime
+
+        opts = onnxruntime.SessionOptions()
+        opts.intra_op_num_threads = threads
+        opts.inter_op_num_threads = 1
+        opts.log_severity_level = 3
+        self.model = onnx_asr.load_model(self.MODEL, str(model_dir), quantization="int8", sess_options=opts,
+                                         providers=["CPUExecutionProvider"]).with_timestamps()
+        self._lock = threading.Lock()
+
+    def transcribe(self, audio16k: np.ndarray, hints: str = "") -> Transcript:
+        t0 = time.perf_counter()
+        with self._lock:
+            result = self.model.recognize(audio16k.astype(np.float32), sample_rate=PIPELINE_SR)
+        text = (result.text or "").strip()
+        logprobs = result.logprobs or []
+        # How sure the model was of the words it picked: the geometric mean of their probabilities.
+        conf = float(np.clip(np.exp(np.mean(logprobs)), 0, 1)) if text and logprobs else 0.0
+        return Transcript(text, conf, int((time.perf_counter() - t0) * 1000))
+
+
+class _Breaker:
+    """Stops calling a hosted service that keeps failing, so callers aren't kept waiting on timeouts."""
+
+    def __init__(self, threshold: int = 2, cool_s: float = 30.0):
+        self.threshold, self.cool_s = threshold, cool_s
+        self._fails = 0
+        self._until = 0.0
+
+    @property
+    def open(self) -> bool:
+        return time.monotonic() < self._until
+
+    def ok(self) -> None:
+        self._fails = 0
+
+    def fail(self) -> None:
+        self._fails += 1
+        if self._fails >= self.threshold:
+            self._fails, self._until = 0, time.monotonic() + self.cool_s
+
+
+def _terms_from_hint(hint: str) -> list[str]:
+    """Business and service names from the recognition hint, for Deepgram's keyterm prompting. The generic hints
+    for names and phone numbers carry no terms."""
+    if not hint or "digit" in hint or "full name" in hint:
+        return []
+    terms = [t.strip(" .") for t in re.split(r"[.,]\s*", hint)]
+    return list(dict.fromkeys(t for t in terms if 3 <= len(t) <= 40))[:8]
+
+
+class DeepgramASR:
+    """Hosted speech recognition (Deepgram Nova-3). Each turn is one request of the caller's audio, about 0.35-0.8 s,
+    and its confidence is real: 1.00 on clear speech. Business and service names are sent as key terms, which is
+    what gets names like "Basit" right. If the service fails or is slow, the local model takes over."""
+
+    URL = "https://api.deepgram.com/v1/listen"
+
+    def __init__(self, api_key: str, fallback=None, timeout: float = 6.0):
+        self._key = api_key
+        self._fallback = fallback  # callable returning a local ASREngine, or None
+        self._http = httpx.Client(timeout=httpx.Timeout(timeout, connect=3.0))  # one connection is kept open between turns
+        self._breaker = _Breaker()
+
+    def _remote(self, audio16k: np.ndarray, hints: str) -> Transcript:
+        t0 = time.perf_counter()
+        params: list[tuple[str, str]] = [("model", "nova-3"), ("language", "en"), ("smart_format", "true"),
+                                         ("encoding", "linear16"), ("sample_rate", str(PIPELINE_SR)), ("channels", "1")]
+        params += [("keyterm", t) for t in _terms_from_hint(hints)]
+        r = self._http.post(self.URL, params=params, content=float_to_pcm16(audio16k),
+                            headers={"Authorization": f"Token {self._key}", "Content-Type": "application/octet-stream"})
+        r.raise_for_status()
+        alts = r.json()["results"]["channels"][0]["alternatives"]
+        text = (alts[0].get("transcript") or "").strip() if alts else ""
+        conf = float(alts[0].get("confidence") or 0.0) if text else 0.0
+        return Transcript(_clean_hallucinations(text), conf, int((time.perf_counter() - t0) * 1000))
+
+    def transcribe(self, audio16k: np.ndarray, hints: str = "") -> Transcript:
+        if not self._breaker.open:
+            try:
+                tr = self._remote(audio16k, hints)
+                self._breaker.ok()
+                return tr
+            except Exception as exc:
+                self._breaker.fail()
+                log.warning("Deepgram failed (%s); using the local speech model", type(exc).__name__)
+        local = self._fallback() if self._fallback else None
+        if local is None:
+            raise RuntimeError("speech recognition is unavailable")
+        return local.transcribe(audio16k, hints)
+
+
 _HALLUCINATIONS = re.compile(r"^(thanks? (you )?for watching|subtitles by|\[.*\]|\(.*\)|you\.?)$", re.I)
 
 
@@ -239,11 +343,148 @@ KOKORO_VOICES: tuple[VoiceInfo, ...] = (
 )
 
 
+PIPER_VOICES: tuple[VoiceInfo, ...] = (
+    VoiceInfo("piper_kristin", "Kristin — clear (US)", "female", "en-US"),
+    VoiceInfo("piper_joe", "Joe — steady (US)", "male", "en-US"),
+)
+
+
 class TTSEngine(Protocol):
     sample_rate: int
 
     def synthesize(self, text: str, voice: str, speed: float = 1.0) -> np.ndarray: ...
     def voices(self) -> list[VoiceInfo]: ...
+
+
+FISH_VOICES: tuple[VoiceInfo, ...] = (VoiceInfo("fish_default", "Fish Audio — standard (US)", "female", "en-US"),)
+
+
+class FishTTS:
+    """Hosted voice (Fish Audio). It sounds natural but takes 0.8-1.4 s per sentence over the network, against 0.3 s
+    for local Piper, and its free plan covers only 10,000 characters a month. So: every phrase is kept on disk and
+    never paid for twice, spending stops at `monthly_chars` (then the local voice speaks), and any failure falls
+    back to the local voice as well."""
+
+    sample_rate = 24000
+    URL = "https://api.fish.audio/v1/tts"
+
+    def __init__(self, api_key: str, data_dir: Path, monthly_chars: int, fallback=None, model: str = "s1", timeout: float = 6.0,
+                 voice_id: str = ""):
+        self._key, self._model, self._cap, self._voice_id = api_key, model, monthly_chars, voice_id
+        self._fallback = fallback  # callable returning a local TTSEngine, or None
+        self._http = httpx.Client(timeout=httpx.Timeout(timeout, connect=3.0))
+        self._breaker = _Breaker()
+        self._usage_file = data_dir / "fish_usage.json"
+        self._cache_dir = data_dir / "tts_cache" / "fish"
+        self._lock = threading.Lock()
+        self._mem: dict[str, np.ndarray] = {}
+        self.verified: set[str] = set()
+
+    def voices(self) -> list[VoiceInfo]:
+        return list(FISH_VOICES)
+
+    # -- spending
+    def _used(self) -> int:
+        try:
+            data = json.loads(self._usage_file.read_text())
+            return int(data["chars"]) if data.get("month") == time.strftime("%Y-%m") else 0
+        except Exception:
+            return 0
+
+    def _spend(self, chars: int) -> None:
+        with self._lock:
+            self._usage_file.parent.mkdir(parents=True, exist_ok=True)
+            self._usage_file.write_text(json.dumps({"month": time.strftime("%Y-%m"), "chars": self._used() + chars}))
+
+    def chars_left(self) -> int:
+        return max(0, self._cap - self._used())
+
+    # -- speech
+    def _remote(self, text: str, speed: float, voice_ref: str) -> bytes:
+        body: dict = {"text": text, "format": "pcm", "sample_rate": self.sample_rate, "latency": "normal"}
+        if voice_ref:
+            body["reference_id"] = voice_ref  # always the same voice
+        if abs(speed - 1.0) > 0.01:
+            body["prosody"] = {"speed": float(np.clip(speed, 0.5, 2.0))}
+        r = self._http.post(self.URL, json=body, headers={"Authorization": f"Bearer {self._key}", "model": self._model})
+        r.raise_for_status()
+        if len(r.content) < 200:
+            raise RuntimeError("empty audio")
+        return r.content
+
+    def synthesize(self, text: str, voice: str, speed: float = 1.0) -> np.ndarray:
+        # "fish:<id>" is the voice a business chose on the Voices page; anything else means the server's default voice
+        ref = voice[5:] if voice.startswith("fish:") and len(voice) == 37 else self._voice_id
+        key = hashlib.sha1(f"{ref}|{text}|{round(float(speed), 2)}".encode()).hexdigest()
+        if key in self._mem:
+            return self._mem[key]
+        path = self._cache_dir / f"{key}.pcm"
+        try:
+            raw = path.read_bytes() if path.exists() else None
+        except OSError:
+            raw = None
+        if raw is None and not self._breaker.open and len(text) <= self.chars_left():
+            try:
+                raw = self._remote(text, speed, ref)
+                self._breaker.ok()
+                self._spend(len(text))
+                self._cache_dir.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(raw)
+            except Exception as exc:
+                self._breaker.fail()
+                log.warning("Fish Audio failed (%s); using the local voice", type(exc).__name__)
+        if raw is not None:
+            audio = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+            if len(self._mem) >= 256:
+                self._mem.pop(next(iter(self._mem)))
+            self._mem[key] = audio
+            return audio
+        local = self._fallback() if self._fallback else None
+        if local is None:
+            raise RuntimeError("no voice is available")
+        voices = local.voices()
+        pick = next((v.id for v in voices if v.gender == "female"), voices[0].id)
+        return resample(local.synthesize(text, pick, speed), local.sample_rate, self.sample_rate)
+
+
+class PiperTTS:
+    """Piper voices (ONNX). Far lighter than Kokoro: on a laptop CPU a sentence takes 0.25-0.7 s to synthesize
+    instead of 2-6 s, so the caller hears the reply almost at once. The voice is plainer than Kokoro's."""
+
+    sample_rate = 22050
+
+    def __init__(self, voices_dir: Path):
+        from piper import PiperVoice
+
+        self._voices = {v.id: PiperVoice.load(voices_dir / f"en_US-{v.id.removeprefix('piper_')}-medium.onnx")
+                        for v in PIPER_VOICES}
+        rates = {pv.config.sample_rate for pv in self._voices.values()}
+        if rates != {self.sample_rate}:
+            raise RuntimeError(f"unexpected Piper sample rates {sorted(rates)}")
+        self._lock = threading.Lock()
+        self.verified: set[str] = set()
+        self._cache: dict[tuple[str, str, float], np.ndarray] = {}
+
+    def voices(self) -> list[VoiceInfo]:
+        return list(PIPER_VOICES)
+
+    def synthesize(self, text: str, voice: str, speed: float = 1.0) -> np.ndarray:
+        from piper import SynthesisConfig
+
+        voice = voice if voice in self._voices else PIPER_VOICES[0].id
+        key = (text, voice, round(float(speed), 2))
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        cfg = SynthesisConfig(length_scale=1.0 / float(np.clip(speed, 0.7, 1.4)))
+        with self._lock:
+            chunks = [np.asarray(c.audio_float_array, dtype=np.float32) for c in self._voices[voice].synthesize(text, cfg)]
+        out = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        if len(text) <= 160:
+            if len(self._cache) >= 256:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[key] = out
+        return out
 
 
 class KokoroTTS:
@@ -289,10 +530,12 @@ _SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
 _CLAUSE = re.compile(r"(?<=[;,:])\s+")
 
 
-def split_sentences(text: str, max_len: int = 70) -> list[str]:
+def split_sentences(text: str, max_len: int = 70, first_max: int = 24) -> list[str]:
     """Short chunks let us start speaking after the first one is synthesised.
 
-    Sentences are split first; long sentences are further split at clause punctuation."""
+    Sentences are split first; long sentences are further split at clause punctuation. The first chunk is kept
+    especially short ("Let me confirm:"), because the caller hears nothing until it is ready; the rest is
+    synthesised while it plays."""
     chunks: list[str] = []
     for sent in (p.strip() for p in _SENTENCE.split(text.strip()) if p.strip()):
         if len(sent) <= max_len:
@@ -307,10 +550,16 @@ def split_sentences(text: str, max_len: int = 70) -> list[str]:
                 cur = f"{cur} {clause}".strip()
         if cur:
             chunks.append(cur)
+    if chunks and len(chunks[0]) > first_max:
+        # Split the opening at its first clause break, if that leaves a piece worth saying on its own.
+        m = next((m for m in re.finditer(r"[,;:]\s+", chunks[0]) if m.start() >= 7), None)
+        if m:
+            chunks[:1] = [chunks[0][:m.start() + 1], chunks[0][m.end():]]
     out: list[str] = []
     for c in chunks:
-        # Merge a very short chunk forward only when the result stays short, keeping first audio fast.
-        if out and len(out[-1]) < 18 and len(out[-1]) + len(c) < 45:
+        # Merge a very short chunk forward only when the result stays short. Never into the first chunk: the
+        # caller is waiting for it.
+        if len(out) > 1 and len(out[-1]) < 18 and len(out[-1]) + len(c) < 45:
             out[-1] = f"{out[-1]} {c}"
         else:
             out.append(c)

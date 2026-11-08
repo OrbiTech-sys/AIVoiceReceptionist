@@ -482,3 +482,17 @@ class AppSecret(Base):
     value_enc: Mapped[str] = mapped_column(Text, nullable=False)
     public_value: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+
+
+class ContactMessage(Timestamped, Base):
+    """A message sent through the public website's contact form. Belongs to the platform, not to a tenant."""
+
+    __tablename__ = "contact_messages"
+    id: Mapped[str] = pk()
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    email: Mapped[str] = mapped_column(String(254), nullable=False)
+    business: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    topic: Mapped[str] = mapped_column(String(16), default="other", nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    handled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    __table_args__ = (Index("ix_contact_messages_created", "created_at"),)
