@@ -7,6 +7,11 @@ name: Deploy to AWS
 #   EC2_HOST     public IP or DNS name of the server
 #   EC2_USER     SSH user on the server (for example ubuntu or ec2-user)
 #   EC2_SSH_KEY  PRIVATE key whose public half is in ~/.ssh/authorized_keys on the server
+#   SERVER_ENV   (optional) extra variables for the server's .env, one NAME=value per line, for example the API keys.
+#                Every deploy merges them into ~/AIVoiceReceptionist/.env (deploy/merge-env.sh): a name that already
+#                exists is replaced, a new one is added, every other line is kept, and VR_SECRET_KEY and DB_PASSWORD are
+#                never changed this way. Copy each value exactly as it is written in your local .env.
+#                After editing this secret, start the workflow again (Actions -> Deploy to AWS -> Run workflow).
 #
 # The runner needs to reach port 22 of the server; GitHub's runner IPs change, so the security group
 # must allow SSH from the internet for this to work.
@@ -56,18 +61,37 @@ jobs:
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
+          SERVER_ENV: ${{ secrets.SERVER_ENV }}
         run: |
-          ssh -i ~/.ssh/deploy_key \
-            -o IdentitiesOnly=yes \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            -o HostKeyAlias=deploy-target \
-            -o ConnectTimeout=20 \
-            -o ServerAliveInterval=30 \
-            "$EC2_USER@$EC2_HOST" "APP_DIR=$APP_DIR bash -s" <<'REMOTE'
+          ssh_opts=(-i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes
+                    -o UserKnownHostsFile="$HOME/.ssh/known_hosts" -o HostKeyAlias=deploy-target
+                    -o ConnectTimeout=20 -o ServerAliveInterval=30)
+          target="$EC2_USER@$EC2_HOST"
+
+          # Optional extra variables for the server's .env (secret SERVER_ENV). They travel inside the SSH
+          # connection, never on a command line, and are merged on the server by deploy/merge-env.sh.
+          if [ -n "$(printf '%s' "$SERVER_ENV" | tr -d '[:space:]')" ]; then
+            # Mask every longer value in this job's log too, in case one is ever echoed by accident.
+            printf '%s\n' "$SERVER_ENV" | tr -d '\r' | while IFS= read -r line; do
+              case "$line" in
+                ''|'#'*) continue ;;
+              esac
+              value="${line#*=}"
+              if [ "$value" != "$line" ] && [ "${#value}" -ge 12 ]; then echo "::add-mask::$value"; fi
+            done
+            printf '%s\n' "$SERVER_ENV" | tr -d '\r' | ssh "${ssh_opts[@]}" "$target" 'umask 077 && cat > "$HOME/.voicerep-env.overrides"'
+          else
+            ssh "${ssh_opts[@]}" "$target" 'rm -f "$HOME/.voicerep-env.overrides"'
+          fi
+
+          ssh "${ssh_opts[@]}" "$target" "APP_DIR=$APP_DIR bash -s" <<'REMOTE'
           set -euo pipefail
+          trap 'rm -f "$HOME/.voicerep-env.overrides"' EXIT
           cd "$HOME/$APP_DIR"
           git pull --ff-only origin main
+          # Merge the extra variables (if any) into .env. The previous .env is kept as ~/.voicerep-env.bak.
+          bash deploy/merge-env.sh "$HOME/.voicerep-env.overrides" .env "$HOME/.voicerep-env.bak"
+          rm -f "$HOME/.voicerep-env.overrides"
           docker compose up -d --build
           docker image prune -f
           # Every deploy leaves build-cache layers behind (about 0.5 GB each). Drop the ones not used for 3 days;
