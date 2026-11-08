@@ -21,6 +21,11 @@ services:
     restart: unless-stopped
     depends_on:
       db: {condition: service_healthy}
+    # Everything in .env reaches the app, so a new setting needs no edit here. The lines under `environment:` win over
+    # .env: they pin the database to the PostgreSQL container below and give a few settings a deployment default.
+    env_file:
+      - path: .env
+        required: false
     environment:
       VR_ENV: ${VR_ENV:-development}
       VR_DATABASE_URL: postgresql+psycopg://voicerep:${DB_PASSWORD:-change-me-locally}@db:5432/voicerep
