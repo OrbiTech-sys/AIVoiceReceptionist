@@ -70,15 +70,9 @@ jobs:
 
           # Optional extra variables for the server's .env (secret SERVER_ENV). They travel inside the SSH
           # connection, never on a command line, and are merged on the server by deploy/merge-env.sh.
+          # Nothing in this job ever prints a value (the script reports counts only), and GitHub hides the secret
+          # itself in the log. Do not add `echo`, `set -x` or `ssh -v` here: that is how a secret would leak.
           if [ -n "$(printf '%s' "$SERVER_ENV" | tr -d '[:space:]')" ]; then
-            # Mask every longer value in this job's log too, in case one is ever echoed by accident.
-            printf '%s\n' "$SERVER_ENV" | tr -d '\r' | while IFS= read -r line; do
-              case "$line" in
-                ''|'#'*) continue ;;
-              esac
-              value="${line#*=}"
-              if [ "$value" != "$line" ] && [ "${#value}" -ge 12 ]; then echo "::add-mask::$value"; fi
-            done
             printf '%s\n' "$SERVER_ENV" | tr -d '\r' | ssh "${ssh_opts[@]}" "$target" 'umask 077 && cat > "$HOME/.voicerep-env.overrides"'
           else
             ssh "${ssh_opts[@]}" "$target" 'rm -f "$HOME/.voicerep-env.overrides"'
