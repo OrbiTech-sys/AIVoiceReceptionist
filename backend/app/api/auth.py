@@ -88,8 +88,8 @@ def _start_session(db: Session, response: Response, request: Request, user: User
     user.last_login_at = utcnow()
     db.commit()
     max_age = s.session_days * 86400
-    response.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True, secure=s.cookie_secure, samesite="lax", path="/")
-    response.set_cookie(CSRF_COOKIE, sess.csrf_token, max_age=max_age, httponly=False, secure=s.cookie_secure, samesite="lax", path="/")
+    response.set_cookie(SESSION_COOKIE, token, max_age=max_age, httponly=True, secure=s.secure_cookies, samesite="lax", path="/")
+    response.set_cookie(CSRF_COOKIE, sess.csrf_token, max_age=max_age, httponly=False, secure=s.secure_cookies, samesite="lax", path="/")
     return sess
 
 

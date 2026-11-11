@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, create_engine, event
+from sqlalchemy import DateTime, create_engine, event, exc
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
@@ -71,7 +72,26 @@ def make_engine(url: str) -> Engine:
 
         return engine
     s = get_settings()
-    return create_engine(url, pool_pre_ping=True, pool_size=s.db_pool_size, max_overflow=s.db_max_overflow)
+    # A connection is tested before use only if it has sat idle for a while (a hosted database's pooler drops idle ones).
+    # Testing on every use, as pool_pre_ping does, costs a whole extra trip to the database for every request.
+    engine = create_engine(url, pool_size=s.db_pool_size, max_overflow=s.db_max_overflow, pool_recycle=300)
+
+    @event.listens_for(engine, "checkin")
+    def _stamp(dbapi_conn, record):
+        record.info["idle_since"] = time.monotonic()
+
+    @event.listens_for(engine, "checkout")
+    def _test_if_idle(dbapi_conn, record, proxy):
+        if time.monotonic() - record.info.get("idle_since", time.monotonic()) > 20:
+            try:
+                cur = dbapi_conn.cursor()
+                cur.execute("SELECT 1")
+                cur.close()
+                dbapi_conn.rollback()
+            except Exception:
+                raise exc.DisconnectionError() from None
+
+    return engine
 
 
 _engine: Engine | None = None

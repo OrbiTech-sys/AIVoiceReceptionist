@@ -204,6 +204,8 @@ async def demo_ws(ws: WebSocket):
                 if len(data) % 2 == 0 and len(data) <= 32000:
                     await call.on_audio(pcm16_to_float(data), 16000)
             elif msg.get("text"):
+                if len(msg["text"]) > 4096:
+                    continue  # control messages are tiny: anything bigger is not worth parsing
                 try:
                     payload = json.loads(msg["text"])
                 except json.JSONDecodeError:

@@ -5,7 +5,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -264,12 +264,15 @@ def onboarding(body: OnboardingIn, ctx: TenantContext = Depends(require_owner), 
 def setup_status(ctx: TenantContext = Depends(require_tenant), db: Session = Depends(get_db)):
     t = ctx.tenant
     tid = t.id
-    n_services = db.scalar(select(func.count()).select_from(Service).where(Service.tenant_id == tid, Service.is_active.is_(True))) or 0
-    n_kb = db.scalar(select(func.count()).select_from(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tid)) or 0
-    n_staff = db.scalar(select(func.count()).select_from(StaffMember).where(StaffMember.tenant_id == tid)) or 0
-    open_days = db.scalar(select(func.count()).select_from(BusinessHours).where(BusinessHours.tenant_id == tid, BusinessHours.is_closed.is_(False))) or 0
-    tel = db.scalar(select(TelephonyIntegration).where(TelephonyIntegration.tenant_id == tid))
-    tested = db.scalar(select(Call.id).where(Call.tenant_id == tid, Call.channel == "browser_demo").limit(1)) is not None
+    # One round trip for all the counts: the database may be far away, and every query costs a full trip there and back.
+    n_services, n_kb, n_staff, open_days, tested, tel_status = db.execute(select(
+        select(func.count()).select_from(Service).where(Service.tenant_id == tid, Service.is_active.is_(True)).scalar_subquery(),
+        select(func.count()).select_from(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tid).scalar_subquery(),
+        select(func.count()).select_from(StaffMember).where(StaffMember.tenant_id == tid).scalar_subquery(),
+        select(func.count()).select_from(BusinessHours).where(BusinessHours.tenant_id == tid, BusinessHours.is_closed.is_(False)).scalar_subquery(),
+        exists().where(Call.tenant_id == tid, Call.channel == "browser_demo"),
+        select(TelephonyIntegration.status).where(TelephonyIntegration.tenant_id == tid).limit(1).scalar_subquery(),
+    )).one()
     items = [
         {"key": "profile", "label": "Business profile", "done": bool(t.address and t.phone), "href": "/settings?tab=profile"},
         {"key": "hours", "label": "Working hours", "done": open_days > 0, "href": "/settings?tab=hours"},
@@ -277,6 +280,6 @@ def setup_status(ctx: TenantContext = Depends(require_tenant), db: Session = Dep
         {"key": "staff", "label": "Staff (optional)", "done": n_staff > 0, "href": "/settings?tab=services", "optional": True},
         {"key": "knowledge", "label": "Business knowledge / FAQs", "done": n_kb > 0, "href": "/receptionist?tab=knowledge"},
         {"key": "test", "label": "Test the receptionist in your browser", "done": tested, "href": "/receptionist?tab=test"},
-        {"key": "phone", "label": "Connect a phone line", "done": bool(tel and tel.status == "connected"), "href": "/integrations"},
+        {"key": "phone", "label": "Connect a phone line", "done": tel_status == "connected", "href": "/integrations"},
     ]
     return {"onboarding_completed": t.onboarding_completed, "onboarding_step": t.onboarding_step, "items": items}

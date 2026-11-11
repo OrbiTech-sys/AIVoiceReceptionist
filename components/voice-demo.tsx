@@ -119,7 +119,6 @@ export function VoiceDemo({ readiness }: { readiness?: Readiness }) {
   const [typed, setTyped] = useState("");
   const [callId, setCallId] = useState<string | null>(null);
   const [latency, setLatency] = useState<{ asr?: number; dialog?: number; tts?: number }>({});
-  const [caps, setCaps] = useState<{ asr: boolean; tts: boolean; vad: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
@@ -229,7 +228,6 @@ export function VoiceDemo({ readiness }: { readiness?: Readiness }) {
         switch (m.type) {
           case "ready":
             setCallId(m.call_id);
-            setCaps({ asr: m.asr, tts: m.tts, vad: m.vad });
             setStage("listening");
             if (!m.asr && micOk) push({ role: "system", text: "Speech recognition model is not installed — type your messages instead." });
             if (!m.tts) push({ role: "system", text: "Voice model is not installed — replies are shown as text only." });
@@ -268,7 +266,7 @@ export function VoiceDemo({ readiness }: { readiness?: Readiness }) {
       };
       sock.onclose = (ev) => {
         if (ev.code === 4401) setError("Your session expired. Sign in again.");
-        else if (ev.code === 4403) setError("This origin is not allowed to open voice sessions (check VR_ALLOWED_ORIGINS).");
+        else if (ev.code === 4403) setError("This website address isn't allowed to start test calls. Please contact support.");
         else if (ev.code === 4429) setError("Too many demo calls are open for this business. Close other tabs and try again.");
         setStage("ended");
         cleanup();
@@ -374,10 +372,9 @@ export function VoiceDemo({ readiness }: { readiness?: Readiness }) {
       </form>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-        <span>Speech-to-text: {latency.asr !== undefined ? `${latency.asr} ms` : "—"}</span>
-        <span>Conversation: {latency.dialog !== undefined ? `${latency.dialog} ms` : "—"}</span>
-        <span>First audio: {latency.tts !== undefined ? `${latency.tts} ms` : "—"}</span>
-        {caps && <span>VAD: {caps.vad === "silero" ? "Silero" : "energy fallback"}</span>}
+        <span>Hearing: {latency.asr !== undefined ? `${latency.asr} ms` : "—"}</span>
+        <span>Thinking: {latency.dialog !== undefined ? `${latency.dialog} ms` : "—"}</span>
+        <span>First sound: {latency.tts !== undefined ? `${latency.tts} ms` : "—"}</span>
         {callId && stage === "ended" && (
           <Link href={`/calls?id=${callId}`} className="font-medium text-accent hover:underline">View call record →</Link>
         )}

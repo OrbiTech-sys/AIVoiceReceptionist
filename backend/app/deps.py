@@ -56,12 +56,15 @@ def load_session(db: Session, token: str | None) -> AuthSession | None:
 
 
 def require_auth(request: Request, db: Session = Depends(get_db)) -> AuthContext:
-    sess = load_session(db, request.cookies.get(SESSION_COOKIE))
-    if sess is None:
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
         raise Unauthorized("Please sign in.")
-    user = db.get(User, sess.user_id)
-    if user is None or not user.is_active:
+    # The session and its user in one query: with a database far away every query is a long trip.
+    row = db.execute(select(AuthSession, User).join(User, User.id == AuthSession.user_id)
+                     .where(AuthSession.token_hash == token_hash(token))).first()
+    if row is None or row[0].expires_at <= utcnow() or not row[1].is_active:
         raise Unauthorized("Please sign in.")
+    sess, user = row
     if request.method in UNSAFE_METHODS:
         header = request.headers.get(CSRF_HEADER, "")
         if not header or not constant_eq(header, sess.csrf_token):
@@ -77,15 +80,13 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> AuthContext
 def require_tenant(ctx: AuthContext = Depends(require_auth), db: Session = Depends(get_db)) -> TenantContext:
     if not ctx.session.active_tenant_id:
         raise Forbidden("No business selected.", code="no_tenant")
-    m = db.scalar(
-        select(Membership).where(
-            Membership.user_id == ctx.user.id, Membership.tenant_id == ctx.session.active_tenant_id
-        )
-    )
-    if m is None:
+    row = db.execute(
+        select(Membership, Tenant).join(Tenant, Tenant.id == Membership.tenant_id).where(
+            Membership.user_id == ctx.user.id, Membership.tenant_id == ctx.session.active_tenant_id)
+    ).first()
+    if row is None:
         raise Forbidden("You do not have access to this business.", code="no_membership")
-    tenant = db.get(Tenant, m.tenant_id)
-    assert tenant is not None
+    m, tenant = row
     return TenantContext(user=ctx.user, session=ctx.session, tenant=tenant, role=m.role)
 
 

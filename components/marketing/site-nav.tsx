@@ -2,16 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState } from "react";
 import { NAV_LINKS } from "@/lib/site";
-
-const noSubscribe = () => () => {};
-// vr_csrf is the one session cookie JavaScript can read. If it has expired, the app sends the visitor to sign in.
-const hasSessionCookie = () => /(?:^|;\s*)vr_csrf=/.test(document.cookie);
-
-function useSignedIn() {
-  return useSyncExternalStore(noSubscribe, hasSessionCookie, () => false);
-}
 
 export function NavLinks() {
   const pathname = usePathname();
@@ -27,29 +19,19 @@ export function NavLinks() {
 }
 
 export function AuthLinks() {
-  const signedIn = useSignedIn();
   return (
     <div className="mk-bar__auth">
-      {signedIn ? (
-        <Link href="/overview" className="mk-btn mk-btn--primary mk-btn--sm">
-          Open dashboard
-        </Link>
-      ) : (
-        <>
-          <Link href="/login" className="mk-signin">
-            Sign in
-          </Link>
-          <Link href="/signup" className="mk-btn mk-btn--primary mk-btn--sm">
-            Create account
-          </Link>
-        </>
-      )}
+      <Link href="/login" className="mk-signin">
+        Sign in
+      </Link>
+      <Link href="/signup" className="mk-btn mk-btn--primary mk-btn--sm">
+        Sign up
+      </Link>
     </div>
   );
 }
 
 export function MobileMenu() {
-  const signedIn = useSignedIn();
   const [open, setOpen] = useState(false);
   const toggle = useRef<HTMLButtonElement>(null);
 
@@ -89,26 +71,16 @@ export function MobileMenu() {
                 </Link>
               </li>
             ))}
-            {signedIn ? (
-              <li>
-                <Link href="/overview" className="mk-btn mk-btn--primary" onClick={close}>
-                  Open dashboard
-                </Link>
-              </li>
-            ) : (
-              <>
-                <li>
-                  <Link href="/login" onClick={close}>
-                    Sign in
-                  </Link>
-                </li>
-                <li>
-                  <Link href="/signup" className="mk-btn mk-btn--primary" onClick={close}>
-                    Create account
-                  </Link>
-                </li>
-              </>
-            )}
+            <li>
+              <Link href="/login" onClick={close}>
+                Sign in
+              </Link>
+            </li>
+            <li>
+              <Link href="/signup" className="mk-btn mk-btn--primary" onClick={close}>
+                Sign up
+              </Link>
+            </li>
           </ul>
         </nav>
       )}

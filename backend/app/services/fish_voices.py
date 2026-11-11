@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from urllib.parse import urlparse
 
 import httpx
 
@@ -44,12 +45,20 @@ def _get(params: dict | None, path: str = "") -> dict:
     return data
 
 
+def _safe_sample_url(url: object) -> str:
+    """The sample clip is played by the browser, so it must be an https address on Fish Audio's own domain."""
+    if not isinstance(url, str):
+        return ""
+    p = urlparse(url)
+    return url if p.scheme == "https" and p.hostname and p.hostname.endswith(".fish.audio") and not p.username else ""
+
+
 def _shape(m: dict) -> dict:
     sample = (m.get("samples") or [{}])[0]
     return {
         "id": f"fish:{m['_id']}", "title": (m.get("title") or "")[:60], "description": (m.get("description") or "").strip()[:140],
         "tags": [t for t in (m.get("tags") or []) if isinstance(t, str)][:6], "likes": int(m.get("like_count") or 0),
-        "sample_url": sample.get("audio") or "", "sample_text": (sample.get("text") or "")[:200],
+        "sample_url": _safe_sample_url(sample.get("audio")), "sample_text": (sample.get("text") or "")[:200],
     }
 
 

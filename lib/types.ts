@@ -119,7 +119,7 @@ export interface Slot {
 
 export interface Readiness {
   asr: { ready: boolean; model: string | null; error: string; latency_ms: number | null };
-  tts: { ready: boolean; model: string | null; error: string; latency_ms: number | null };
+  tts: { ready: boolean; model: string | null; error: string; latency_ms: number | null; chars_left?: number | null; chars_cap?: number | null };
   vad: { ready: boolean; model: string };
   llm: { ready: boolean; configured: boolean; provider?: string; error: string; latency_ms: number | null };
   voice_ready: boolean;

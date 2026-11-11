@@ -84,6 +84,43 @@ def fetch_page(url: str, client: httpx.Client | None = None) -> tuple[str, str]:
             client.close()
 
 
+# ------------------------------------------------------------------ what may be said to a caller
+_PLACEHOLDER = re.compile(r"\[[^\]]{2,}\]")  # a template field nobody filled in: "[Enter clinic name]"
+_PAGE_FURNITURE = re.compile(r"customizable template|customize and verify|verify before use|\bpage \d+\b|all rights reserved", re.I)
+_STAFF_VERB = re.compile(r"^(ask|confirm|verify|notify|document|record|escalate|transfer|advise|repeat|greet|log|collect|route|refer|obtain|"
+                         r"inform|ensure|identify|determine|clarify|offer to|understand:|empathi[sz]e|"
+                         r"do not (promise|disclose|share|diagnose|give|quote|discuss|speculate|guarantee|argue|interrupt))\b", re.I)
+_ABOUT_STAFF = re.compile(r"\b(the caller|callers?'s?|the receptionist|receptionists?|front desk|staff member|escalat\w+|script|protocol)\b", re.I)
+_BULLETS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u2022\u25cf\u25aa\u25a0\u25e6\u25ba\u2023\u2043\uf0b7\uf0a7]+")
+_SENT = re.compile(r"(?<=[.!?])\s+")
+
+
+def clean_text(text: str) -> str:
+    """Bullet symbols and control characters that PDFs carry as text, and blank-looking runs of space."""
+    return re.sub(r"\s+", " ", _BULLETS.sub(" ", text)).strip()
+
+
+def scrub_answer(answer: str) -> str:
+    """Cut out sentences that can't be said to a caller (staff instructions, template fields, page furniture), so one glued
+    onto the end of a real answer doesn't spoil it."""
+    keep = [x for x in (y.strip() for y in _SENT.split(clean_text(answer)))
+            if x and not (_STAFF_VERB.match(x) or _ABOUT_STAFF.search(x) or _PLACEHOLDER.search(x) or _PAGE_FURNITURE.search(x))]
+    return " ".join(keep)
+
+
+def is_speakable(question: str, answer: str) -> bool:
+    """Could this be said to a caller as it stands? Not if it has template fields still to be filled in, is page header or
+    footer text, or is an instruction written for the receptionist ("Ask for the patient's name") rather than a fact."""
+    text = f"{question} {answer}"
+    if _PLACEHOLDER.search(text) or _PAGE_FURNITURE.search(text) or _BULLETS.search(text):
+        return False
+    sentences = [x.strip() for x in _SENT.split(answer) if x.strip()]
+    if not sentences:
+        return False
+    staff = sum(bool(_STAFF_VERB.match(x) or _ABOUT_STAFF.search(x)) for x in sentences)
+    return staff * 2 < len(sentences) or (len(sentences) == 1 and not staff)
+
+
 # ------------------------------------------------------------------ HTML and PDF to blocks
 class _Extractor(HTMLParser):
     def __init__(self) -> None:
@@ -153,17 +190,26 @@ def pdf_to_blocks(data: bytes) -> list[Block]:
         raise
     except Exception:
         raise AppError("That PDF couldn't be read.", code="invalid_file")
+    # Lines that repeat on several pages (running headers and footers, "Page 3") are not content.
+    page_lines = [[clean_text(ln) for ln in page.splitlines()] for page in pages]
+    seen: dict[str, int] = {}
+    for lines in page_lines:
+        for key in {re.sub(r"\d+", "#", ln) for ln in lines if ln and len(ln) <= 140}:
+            seen[key] = seen.get(key, 0) + 1
+    repeat_at = max(2, int(len(pages) * 0.4 + 0.99))
     blocks: list[Block] = []
     heading = ""
-    for page in pages:
+    for lines in page_lines:
+        lines = [ln for ln in lines if not (ln and (re.fullmatch(r"(page )?\d+( of \d+)?", ln, re.I) or
+                                                    (len(ln) <= 140 and seen.get(re.sub(r"\d+", "#", ln), 0) >= repeat_at)))]
+        lines = [re.sub(r"^\d+[.)]\s+(?=\S)", "", ln) for ln in lines]  # "3. Insurance" -> "Insurance"
         para: list[str] = []
-        lines = [ln.strip() for ln in page.splitlines()]
         for i, line in enumerate(lines + [""]):
             nxt = lines[i + 1] if i + 1 < len(lines) else ""
             # A short line ending in "?" is a question the document answers underneath: always a new section, even
             # with no blank line before it (PDF text usually has none). Other headings are short lines without
             # closing punctuation.
-            is_question = bool(line) and line.endswith("?") and len(line) <= 90 and bool(nxt)
+            is_question = bool(line) and line.endswith("?") and len(line) <= 90 and bool(nxt) and not line.startswith("Q:")
             is_heading = is_question or (bool(line) and len(line) <= 60 and not re.search(r"[.,;:!?]$", line) and bool(nxt) and len(line.split()) <= 8)
             if is_question and para:
                 blocks.append((heading, re.sub(r"\s+", " ", " ".join(para)).strip()))
@@ -235,15 +281,37 @@ def import_website(url: str, client: httpx.Client | None = None) -> tuple[list[t
         t, b, _ = html_to_blocks(page_html)
         blocks += [(h or t, text) for h, text in b]
         pages += 1
-    entries = blocks_to_entries(blocks, title)
+    entries = [(clean_text(q), clean_text(a)) for q, a in blocks_to_entries(blocks, title)]
+    entries = [(q, a) for q, a in entries if is_speakable(q, a)]
     if not entries:
         raise AppError("No readable text was found on that page. Pages that need JavaScript to show their text can't be read; "
                        "try the page's print/PDF version.", code="empty_import")
     return entries, pages
 
 
-def import_pdf(data: bytes) -> list[tuple[str, str]]:
-    entries = blocks_to_entries(pdf_to_blocks(data))
+_QA = re.compile(r"\bQ:\s*(.+?)\s*\bA:\s*(.+?)(?=\s*\bQ:\s|\Z)", re.S)
+
+
+def import_pdf(data: bytes) -> tuple[list[tuple[str, str]], int]:
+    """(entries, how many passages were left out because they couldn't be said to a caller)."""
+    blocks, pairs = [], []
+    for heading, text in pdf_to_blocks(data):
+        found = _QA.findall(text)
+        if found:  # "Q: ... A: ..." written out in the document
+            pairs += [(clean_text(q)[:300], clean_text(a)[:1000]) for q, a in found]
+            text = _QA.split(text)[0].strip()
+        if text:
+            blocks.append((heading, text))
+    entries = pairs + blocks_to_entries(blocks)
+    kept = [(q, scrub_answer(a)) for q, a in entries if is_speakable(q, scrub_answer(a)) or is_speakable(q, a)]
+    kept = [(q, a) for q, a in kept if a and is_speakable(q, a)]
+    return finish_import(kept, len(entries) - len(kept))
+
+
+def finish_import(entries: list[tuple[str, str]], ignored: int) -> tuple[list[tuple[str, str]], int]:
+    entries = list(dict.fromkeys(entries))[:MAX_ENTRIES]
     if not entries:
-        raise AppError("No text was found in that PDF (scanned pages are images and can't be read).", code="empty_import")
-    return entries
+        raise AppError("Nothing in that PDF can be said to callers as written: it has no readable text (scanned pages are images), "
+                       "or it is made of template fields to fill in and instructions for staff. Fill it in and write answers "
+                       "as facts, or use a question-and-answer list (CSV).", code="empty_import")
+    return entries, ignored

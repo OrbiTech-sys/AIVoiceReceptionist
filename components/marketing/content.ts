@@ -47,7 +47,7 @@ export const FAQ = [
   },
   {
     q: "Where does the speech processing happen?",
-    a: "On our server, using open-source models: Whisper for speech recognition, Silero for voice detection and Kokoro for the voice. Caller audio isn’t sent to a paid AI service. Your phone provider still carries the call itself.",
+    a: "Speech is turned into text and the receptionist’s replies are turned into speech by trusted online speech services, and an AI service is asked only about sentences our own rules couldn’t understand. Your privacy policy page lists what is sent and to whom. Your phone provider also carries the call itself.",
   },
   {
     q: "Is it HIPAA compliant?",

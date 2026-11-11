@@ -22,6 +22,7 @@ from ..services.notifications import notify
 from . import nlu, runtime
 from .dialog import Receptionist, Reply
 from .engines import PIPELINE_SR, StreamResampler, TurnDetector, split_sentences
+from .agent import get_agent
 from .llm import LocalLLM
 from .tools import ReceptionistTools, load_snapshot
 
@@ -35,7 +36,7 @@ class Transport(Protocol):
 
 
 class CallSession:
-    SILENCE_PROMPT_S = 9.0
+    SILENCE_PROMPT_S = 12.0  # people read out numbers and think: "Are you still there?" after 9 s felt pushy
     HOLD_UNFINISHED_S = 2.5  # how long to wait for the rest of a sentence that stopped mid-way
 
     def __init__(self, tenant_id: str, transport: Transport, *, channel: str, caller_number: str | None = None,
@@ -62,6 +63,7 @@ class CallSession:
         self._greeting: asyncio.Task | None = None
         self._held: tuple[str, float] | None = None  # the start of a sentence the caller hasn't finished
         self._held_task: asyncio.Task | None = None
+        self._asr_failures = 0  # recognitions in a row that failed
         self._resampler = StreamResampler(input_sr, PIPELINE_SR)
         self._recording: wave.Wave_write | None = None
         self._recording_name: str | None = None
@@ -78,7 +80,8 @@ class CallSession:
         self.call_id = await loop.run_in_executor(None, self._create_call)
         tools = ReceptionistTools(self.tenant_id, self.call_id)
         llm = await loop.run_in_executor(None, LocalLLM.maybe)
-        self.dialog = Receptionist(snap, tools, caller_number=self.caller_number, channel=self.channel, llm=llm)
+        agent = await loop.run_in_executor(None, get_agent)
+        self.dialog = Receptionist(snap, tools, caller_number=self.caller_number, channel=self.channel, llm=llm, agent=agent)
         self.asr = await loop.run_in_executor(None, runtime.get_asr)
         self.tts = await loop.run_in_executor(None, runtime.get_tts)
         vad, vad_kind = runtime.new_vad()
@@ -230,9 +233,17 @@ class CallSession:
         try:
             tr = await loop.run_in_executor(None, self.asr.transcribe, audio16k, hint)
         except Exception as exc:
-            log.exception("ASR failed")
-            await self._fail(f"ASR error: {type(exc).__name__}")
+            # One slow or failed recognition must not end the call: ask the caller to repeat. Only when it keeps
+            # failing is the call given up on (and the team asked to call back).
+            self._asr_failures += 1
+            log.warning("speech recognition failed (%s), %d in a row", type(exc).__name__, self._asr_failures)
+            self._log("state", "speech recognition failed", {"error": type(exc).__name__, "in_a_row": self._asr_failures})
+            if self._asr_failures >= 3:
+                await self._fail(f"ASR error: {type(exc).__name__}")
+            else:
+                await self.say(Reply("Sorry, I didn't catch that. Could you say it again?"))
             return
+        self._asr_failures = 0
         if not tr.text or tr.confidence < 0.15:
             # Sound was detected but no words came out of it. Keep a record, so "it doesn't hear me" can be told apart
             # from "it never got any sound" (see the call's events).

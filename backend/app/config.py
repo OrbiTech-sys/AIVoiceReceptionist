@@ -80,6 +80,7 @@ class Settings(BaseSettings):
     fish_audio_api_key: str = Field("", validation_alias=AliasChoices("VR_FISH_AUDIO_API_KEY", "FISH_AUDIO_API_KEY"))
     asr_provider: str = "auto"  # auto (Deepgram when its key is set) | local
     local_fallback: bool = True  # false = never load the local speech models: if a hosted service fails, the call fails
+    agent_mode: str = "auto"  # auto (the LangGraph agent when a Groq key is set) | off
     llm_provider: str = "auto"  # auto (Groq when its key is set and no llm_url) | local
     groq_model: str = "qwen/qwen3.8-27b"  # about 200 ms and 85 tokens for a classification
     llm_calls_per_call: int = 6  # hard cap on LLM calls in one conversation, to bound the cost
@@ -114,6 +115,11 @@ class Settings(BaseSettings):
     @property
     def origins(self) -> list[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+
+    @property
+    def secure_cookies(self) -> bool:
+        """Session cookies are only ever sent over HTTPS in production, whatever VR_COOKIE_SECURE says."""
+        return self.cookie_secure or self.env == "production"
 
     @property
     def is_sqlite(self) -> bool:

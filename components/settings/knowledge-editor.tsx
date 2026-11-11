@@ -10,9 +10,10 @@ import { useApi } from "@/lib/hooks";
 interface Entry { id: string; kind: string; question: string; answer: string; is_active: boolean }
 const KINDS: Record<string, string> = { faq: "FAQ", policy: "Policy", directions: "Directions", general: "General" };
 
-function importMessage(r: { imported: number; skipped?: number }) {
+function importMessage(r: { imported: number; skipped?: number; ignored?: number }) {
   const skipped = r.skipped ? ` (${r.skipped} already saved)` : "";
-  return `Added ${r.imported} ${r.imported === 1 ? "entry" : "entries"}${skipped}`;
+  const ignored = r.ignored ? `. ${r.ignored} ${r.ignored === 1 ? "part was" : "parts were"} left out: blank template fields, page headers or instructions for staff can't be said to callers` : "";
+  return `Added ${r.imported} ${r.imported === 1 ? "entry" : "entries"}${skipped}${ignored}`;
 }
 
 export function KnowledgeEditor() {
@@ -46,7 +47,7 @@ export function KnowledgeEditor() {
     const fd = new FormData();
     fd.append("file", f);
     try {
-      const r = await api<{ imported: number; skipped?: number }>("/api/knowledge/import", { body: fd });
+      const r = await api<{ imported: number; skipped?: number; ignored?: number }>("/api/knowledge/import", { body: fd });
       toast.success(importMessage(r));
       reload(true);
     } catch (e) {
@@ -141,7 +142,7 @@ export function KnowledgeEditor() {
         </div>
       )}
       <p className="mt-2 text-xs text-subtle">
-        Reading a website or PDF saves its text as short passages that the receptionist quotes, so check them and delete anything you don&apos;t want said on calls. Pages that need JavaScript to show text and scanned PDFs can&apos;t be read.
+        Reading a website or PDF saves its text as short passages that the receptionist quotes, so check them and delete anything you don&apos;t want said on calls. Blank template fields (such as [Enter clinic name]), page headers and instructions written for staff are left out automatically: fill templates in first, and write answers as facts a caller can be told. Pages that need JavaScript to show text and scanned PDFs can&apos;t be read.
       </p>
       <p className="mt-1 text-xs text-subtle">CSV format: <code>question,answer</code>. TXT format: lines starting with <code>Q:</code> and <code>A:</code>, separated by blank lines. Max 200 KB.</p>
 

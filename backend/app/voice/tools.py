@@ -21,6 +21,7 @@ from ..models import (
 )
 from ..security import normalize_phone
 from ..services import scheduling
+from ..services.knowledge_import import is_speakable
 from ..services.notifications import notify
 from ..services.scheduling import get_policy
 from ..services.timeutil import local_today, zone
@@ -107,8 +108,11 @@ def load_snapshot(tenant_id: str) -> TenantSnapshot:
             holidays[x.date] = (x.label, [] if x.is_closed or not x.open_time else [(x.open_time, x.close_time)])
         services = [{"id": s.id, "name": s.name, "duration": s.duration_min, "price": s.price_text, "description": s.description}
                     for s in db.scalars(select(Service).where(Service.tenant_id == tenant_id, Service.is_active.is_(True)).order_by(Service.name))]
+        # Only what can be said to a caller: leftovers from imports (template fields, page headers, staff instructions)
+        # are never read out, even if they are still saved.
         kb = [{"id": k.id, "kind": k.kind, "q": k.question, "a": k.answer}
-              for k in db.scalars(select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tenant_id, KnowledgeEntry.is_active.is_(True)))]
+              for k in db.scalars(select(KnowledgeEntry).where(KnowledgeEntry.tenant_id == tenant_id, KnowledgeEntry.is_active.is_(True)))
+              if is_speakable(k.question, k.answer)]
         policy = get_policy(db, tenant_id)
         db.commit()
         return TenantSnapshot(
@@ -189,7 +193,7 @@ class ReceptionistTools:
                     break
         return [SlotOption(s.start, s.staff_id, s.staff_name) for s in picked[:limit]]
 
-    def book(self, service_id: str, slot: SlotOption, name: str, phone: str | None, notes: str = "") -> ToolResult:
+    def book(self, service_id: str, slot: SlotOption, name: str, phone: str | None, notes: str = "", email: str = "") -> ToolResult:
         if not name or len(name) > 120:
             return ToolResult(False, "invalid name", "invalid_input")
         # A number in another country's local format can't be filed, but it must not cost the caller their appointment.
@@ -200,7 +204,7 @@ class ReceptionistTools:
             t = self._tenant(db)
             try:
                 appt = scheduling.book_appointment(
-                    db, t, service_id=service_id, start=slot.start, customer_name=name, customer_phone=e164,
+                    db, t, service_id=service_id, start=slot.start, customer_name=name, customer_phone=e164, customer_email=email,
                     staff_id=slot.staff_id, source="ai_call", notes=notes, call_id=self.call_id)
             except scheduling.SlotUnavailable as exc:
                 return ToolResult(False, exc.message, "slot_unavailable")

@@ -49,7 +49,7 @@ services:
       VR_VAPID_CONTACT: ${VR_VAPID_CONTACT:-mailto:admin@example.com}
     volumes: [appdata:/app/data]    # models, uploads, recordings
     # 9092 is the AudioSocket listener. It has no login of its own, so only this machine (Asterisk) may reach it.
-    ports: ["8000:8000", "127.0.0.1:9092:9092"]
+    ports: ["127.0.0.1:8000:8000", "127.0.0.1:9092:9092"]  # only nginx on this machine reaches the API
 
   web:
     restart: unless-stopped
@@ -58,7 +58,7 @@ services:
       # .env itself stays out of the image (.dockerignore), so the one browser setting is handed over here.
       args: {BACKEND_URL: "http://api:8000", NEXT_PUBLIC_VOICE_WS_ORIGIN: "${NEXT_PUBLIC_VOICE_WS_ORIGIN:-}"}
     depends_on: [api]
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]  # only nginx on this machine reaches the site
 
   # Optional LLM that only classifies unusual phrasing (backend/app/voice/llm.py). OFF by default: it needs about
   # 2 GB of RAM of its own on top of everything else. To use it:

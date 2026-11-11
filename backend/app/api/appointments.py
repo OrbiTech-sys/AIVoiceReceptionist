@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload
 
 from ..db import get_db
 from ..deps import TenantContext, require_tenant
@@ -47,7 +47,7 @@ class NotesIn(BaseModel):
 
 def _q(ctx: TenantContext):
     return (select(Appointment).where(Appointment.tenant_id == ctx.tenant_id)
-            .options(selectinload(Appointment.contact), selectinload(Appointment.service), selectinload(Appointment.staff)))
+            .options(joinedload(Appointment.contact), joinedload(Appointment.service), joinedload(Appointment.staff)))
 
 
 @router.get("")

@@ -14,44 +14,39 @@ import type { Readiness } from "@/lib/types";
 
 type Tab = "test" | "voice" | "knowledge" | "safety";
 
-const MODEL_NAMES: Record<string, string> = {
-  "deepgram-nova-3": "Deepgram Nova-3 (online service)",
-  "asr-parakeet-tdt-0.6b-v2": "NVIDIA Parakeet (this server)",
-  "asr-base.en": "Whisper base.en (this server)",
-  "asr-tiny.en": "Whisper tiny.en (this server)",
-  "asr-small.en": "Whisper small.en (this server)",
-  "tts-piper": "Piper (this server)",
-  "tts-kokoro": "Kokoro-82M (this server)",
-  "tts-fish": "Fish Audio (online service)",
-};
-
 function ModelStatus({ r }: { r?: Readiness }) {
-  const row = (label: string, ok: boolean | undefined, detail: string, ms?: number | null) => (
+  const row = (label: string, ok: boolean | undefined, ms?: number | null) => (
     <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
       <span className="text-muted">{label}</span>
       <span className="flex items-center gap-2 text-right">
-        <span className="text-xs text-subtle">{detail}{ms ? ` · ~${ms} ms` : ""}</span>
-        <Badge tone={ok ? "success" : "warning"} dot>{ok ? "Ready" : "Not installed"}</Badge>
+        {ms ? <span className="text-xs text-subtle">about {(ms / 1000).toFixed(1)} s</span> : null}
+        <Badge tone={ok ? "success" : "warning"} dot>{ok ? "Ready" : "Not ready"}</Badge>
       </span>
     </div>
   );
+  const low = typeof r?.tts.chars_left === "number" && r.tts.chars_left < (r.tts.chars_cap ?? 0) * 0.15;
   return (
-    <Card title={<span className="flex items-center gap-2"><Cpu className="size-4" /> AI models</span>} description="Each part runs on this server or uses an online service, as set in your server settings (.env).">
+    <Card title={<span className="flex items-center gap-2"><Cpu className="size-4" /> Receptionist health</span>} description="Whether your receptionist can hear and speak right now.">
       {!r ? <p className="text-[13px] text-muted">Checking…</p> : (
         <div className="divide-y divide-border">
-          {row("Speech recognition", r.asr.ready, MODEL_NAMES[r.asr.model ?? ""] ?? r.asr.model ?? "—", r.asr.latency_ms)}
-          {row("Voice activity detection", r.vad.ready, r.vad.model === "silero" ? "Silero VAD" : "Energy fallback")}
-          {row("Text-to-speech", r.tts.ready, MODEL_NAMES[r.tts.model ?? ""] ?? r.tts.model ?? "—", r.tts.latency_ms)}
-          <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
-            <span className="text-muted">Understanding unclear sentences (optional)</span>
-            <span className="flex items-center gap-2 text-right">
-              {r.llm.ready && <span className="text-xs text-subtle">{r.llm.provider === "groq" ? "Groq (online service)" : "Local model"}</span>}
-              <Badge tone={r.llm.ready ? "success" : "neutral"}>{r.llm.ready ? "Ready" : r.llm.configured ? "Unreachable" : "Not used"}</Badge>
-            </span>
-          </div>
+          {row("Hearing callers", r.asr.ready, r.asr.latency_ms)}
+          {row("Speaking to callers", r.tts.ready, r.tts.latency_ms)}
+          {typeof r.tts.chars_left === "number" && (
+            <div className="flex items-center justify-between gap-3 py-1.5 text-sm">
+              <span className="text-muted">Voice allowance this month</span>
+              <Badge tone={r.tts.chars_left === 0 ? "danger" : low ? "warning" : "success"} dot>
+                {r.tts.chars_left === 0 ? "Used up" : low ? "Running low" : "OK"}
+              </Badge>
+            </div>
+          )}
         </div>
       )}
-      {r && (r.asr.error || r.tts.error) && <p className="mt-2 text-xs text-danger">{r.asr.error || r.tts.error}</p>}
+      {r && (r.asr.error || r.tts.error) && <p className="mt-2 text-xs text-danger">Something is wrong with the receptionist&apos;s hearing or voice. Please contact support.</p>}
+      {r && low && (
+        <p className="mt-2 text-xs text-warning">
+          {r.tts.chars_left === 0 ? "The voice allowance for this month is used up, so calls can't be answered by voice until next month. Contact support to add more." : "The voice allowance is almost used up. Contact support before it runs out so calls keep being answered."}
+        </p>
+      )}
     </Card>
   );
 }
@@ -76,7 +71,7 @@ function SafetyForm() {
           catch (e) { toast.error(errorMessage(e)); } finally { setBusy(false); }
         }}>Save</Button>
       </Card>
-      <Card title="Built-in boundaries" description="These rules are enforced by the conversation engine, not by prompts.">
+      <Card title="Built-in boundaries" description="These rules are built in and always apply.">
         <ul className="list-disc space-y-1.5 pl-5 text-[13px] text-muted">
           <li>Answers only from your hours, address, services, prices and knowledge entries — never invents prices, policies or availability.</li>
           <li>Bookings, changes and cancellations go through validated backend checks. A booking is confirmed to the caller only after it is saved.</li>

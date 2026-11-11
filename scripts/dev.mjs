@@ -5,8 +5,9 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const API_PORT = 8000;
-const WEB_PORT = 3000;
+// Other ports let a second copy run beside this one: DEV_API_PORT=8001 DEV_WEB_PORT=3001 npm run dev
+const API_PORT = Number(process.env.DEV_API_PORT) || 8000;
+const WEB_PORT = Number(process.env.DEV_WEB_PORT) || 3000;
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isWindows = process.platform === "win32";
@@ -50,8 +51,8 @@ function stopAll(exitCode) {
   process.exit(exitCode);
 }
 
-function start(name, command, args) {
-  const child = spawn(command, args, { cwd: root, stdio: "inherit" });
+function start(name, command, args, env = {}) {
+  const child = spawn(command, args, { cwd: root, stdio: "inherit", env: { ...process.env, ...env } });
   children.set(name, child);
   child.once("error", (error) => {
     console.error(`Could not start the ${name}: ${error.message}`);
@@ -86,4 +87,4 @@ async function backendReady(timeoutMs) {
 
 if (await backendReady(90_000)) console.log("The backend is ready, starting the frontend.\n");
 else if (!stopping) console.error("The backend hasn't answered after 90 seconds; starting the frontend anyway.\n");
-if (!stopping) start("frontend", process.execPath, [next, "dev"]);
+if (!stopping) start("frontend", process.execPath, [next, "dev", "-p", String(WEB_PORT)], { BACKEND_URL: `http://127.0.0.1:${API_PORT}` });

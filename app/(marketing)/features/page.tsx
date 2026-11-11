@@ -57,9 +57,9 @@ const GROUPS: { title: string; rows: Row[] }[] = [
   {
     title: "How it’s built",
     rows: [
-      { name: "Speech recognition", does: "Whisper, running on our server." },
-      { name: "Voice detection", does: "Silero VAD, so it knows when a caller has finished talking." },
-      { name: "Speech", does: "Kokoro-82M, an open-weight text-to-speech model." },
+      { name: "Hearing", does: "An online speech-to-text service, given your business and service names so they are heard correctly." },
+      { name: "Understanding", does: "Clear rules handle the call. An AI service is asked only about sentences the rules could not understand." },
+      { name: "Voice", does: "An online text-to-speech service, so the receptionist always sounds the same." },
       { name: "Sign-in security", does: "Argon2id password hashing, HttpOnly session cookies, CSRF checks and rate limits." },
       { name: "Business separation", does: "Each business’s data is scoped on the server, never by what a browser sends." },
     ],

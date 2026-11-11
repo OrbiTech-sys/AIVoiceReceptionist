@@ -238,7 +238,7 @@ function Preferences() {
               <p className="mt-2 text-xs text-muted">{p.push_subscriptions} device(s) subscribed. Push needs a supported browser, your permission, and HTTPS in production. On iPhone, add the app to your Home Screen first (iOS 16.4+). Devices play their own system sound for push alerts — custom sounds only play while the dashboard is open.</p>
               <Button size="sm" variant="ghost" className="mt-1" onClick={async () => { await api("/api/notifications/test", { method: "POST" }); toast.success("Test notification sent"); }}>Send test notification</Button>
             </div>
-            <Switch checked={p.email_enabled} onChange={(v) => set("email_enabled", v)} disabled={!p.email_available} label="E-mail" description={p.email_available ? "Sent through your configured SMTP server." : "Not configured on this server (set VR_SMTP_* variables)."} />
+            <Switch checked={p.email_enabled} onChange={(v) => set("email_enabled", v)} disabled={!p.email_available} label="E-mail" description={p.email_available ? "Copies of notifications are sent to your e-mail." : "E-mail alerts aren't switched on yet. Contact support to enable them."} />
             <Switch checked={p.quiet_hours_enabled} onChange={(v) => set("quiet_hours_enabled", v)} label="Quiet hours" description="No push or sound for routine events. Urgent alerts still come through." />
             {p.quiet_hours_enabled && (
               <div className="flex items-center gap-2">

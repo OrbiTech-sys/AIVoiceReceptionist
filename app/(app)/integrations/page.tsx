@@ -54,22 +54,22 @@ export default function IntegrationsPage() {
     <>
       <PageHeader title="Integrations" description="An integration only shows as connected after it has been validated." />
       <div className="space-y-4">
-        <IntegrationCard icon={<PhoneCall className="size-5" />} name="Phone line (SIP via Asterisk)" status={telLabel} tone={statusTone(telStatus)}
-          enables="Answer real phone calls. Requires a SIP provider (paid phone number + per-minute charges) and an Asterisk server."
+        <IntegrationCard icon={<PhoneCall className="size-5" />} name="Phone line" status={telLabel} tone={statusTone(telStatus)}
+          enables="Answer real phone calls on your business number. Needs a phone number from a phone provider, which they bill you for."
           action={<Button size="sm" variant={phoneOpen ? "secondary" : "primary"} onClick={() => setPhoneOpen(!phoneOpen)}>{phoneOpen ? "Close" : telStatus === "not_configured" ? "Configure" : "Manage"}</Button>}>
           {tel.data?.last_error && !phoneOpen && <p className="text-[13px] text-warning">{tel.data.last_error}</p>}
           {phoneOpen && <PhoneSetup />}
         </IntegrationCard>
 
-        <IntegrationCard icon={<BellRing className="size-5" />} name="Web Push notifications" status={push} tone={push.startsWith("Enabled") ? "success" : push === "Blocked" ? "danger" : "neutral"}
-          enables="Standards-based browser/device alerts for bookings and urgent calls. Free; no third-party account needed."
+        <IntegrationCard icon={<BellRing className="size-5" />} name="Phone & browser alerts" status={push} tone={push.startsWith("Enabled") ? "success" : push === "Blocked" ? "danger" : "neutral"}
+          enables="Alerts on this device for new bookings and urgent calls. Free."
           action={<Link href="/notifications?tab=prefs"><Button size="sm">Configure</Button></Link>} />
 
-        <IntegrationCard icon={<Mail className="size-5" />} name="E-mail (SMTP)" status={sys.data?.email_configured ? "Configured" : "Not configured"} tone={sys.data?.email_configured ? "success" : "neutral"}
-          enables="Optional e-mail copies of notifications through your own SMTP server. Configured by the server administrator (VR_SMTP_* settings)." />
+        <IntegrationCard icon={<Mail className="size-5" />} name="E-mail alerts" status={sys.data?.email_configured ? "Configured" : "Not configured"} tone={sys.data?.email_configured ? "success" : "neutral"}
+          enables="Optional e-mail copies of your notifications. Contact support to switch this on." />
 
-        <IntegrationCard icon={<Cpu className="size-5" />} name="Local AI models" status={sys.data ? (sys.data.voice_ready ? "Ready" : "Setup required") : "Checking…"} tone={sys.data?.voice_ready ? "success" : "warning"}
-          enables="Speech recognition (faster-whisper), voice activity detection (Silero) and speech synthesis (Kokoro) running on your own server — no paid AI APIs."
+        <IntegrationCard icon={<Cpu className="size-5" />} name="Hearing and voice" status={sys.data ? (sys.data.voice_ready ? "Ready" : "Not ready") : "Checking…"} tone={sys.data?.voice_ready ? "success" : "warning"}
+          enables="Lets your receptionist hear callers and answer in a natural voice. Use Test to try it."
           action={<Link href="/receptionist?tab=test"><Button size="sm">Test</Button></Link>} />
 
         <p className="text-xs text-muted">Calendar sync with external providers is not required: appointments are stored in the built-in calendar.</p>

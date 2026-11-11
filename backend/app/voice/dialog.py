@@ -19,6 +19,9 @@ from .tools import ApptInfo, ReceptionistTools, SlotOption, TenantSnapshot
 log = logging.getLogger("voicerep.dialog")
 
 DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+# Booking steps after a time was chosen, where the caller may still ask for another time.
+LATE_BOOKING_STATES = ("book_name", "book_name_confirm", "book_phone", "book_phone_callerid", "book_phone_confirm", "book_email",
+                       "book_email_confirm", "book_confirm")
 # Names are what speech recognition gets wrong most often, so unless it was very sure, the name is read back.
 NAME_SURE = 0.9
 
@@ -42,18 +45,21 @@ class Booking:
     appointment: ApptInfo | None = None  # for reschedule / cancel
     candidates: list[ApptInfo] = field(default_factory=list)
     reason: str = ""
+    email: str = ""  # given instead of a phone number
     reason_final: bool = False  # the reason is already known, so don't ask the caller for one
     partial_digits: str = ""  # a phone number the caller is giving in pieces
 
 
 class Receptionist:
     def __init__(self, snap: TenantSnapshot, tools: ReceptionistTools, *, caller_number: str | None = None,
-                 channel: str = "browser_demo", llm=None, now: datetime | None = None):
+                 channel: str = "browser_demo", llm=None, agent=None, now: datetime | None = None):
         self.snap = snap
         self.tools = tools
         self.caller_number = caller_number
         self.channel = channel
         self.llm = llm
+        self.agent = agent  # the optional LangGraph agent (app/voice/agent.py)
+        self._asked_again = False  # the agent asked the caller to clarify: that turn still counts as not understood
         self._now = now
         self.tz = zone(snap.timezone)
         self.state = "idle"
@@ -67,7 +73,8 @@ class Receptionist:
         self.wants_transfer = False
         self.outcome_flags: set[str] = set()
         self.caller_name: str | None = None
-        self.caller_phone: str | None = None  # a number the caller confirmed earlier in this call
+        self.caller_phone: str | None = None  # a number given earlier in this call
+        self.phone_confirmed = True  # false while the number was only picked up from a long sentence and still needs reading back
         self.llm_calls = 0  # LLM questions asked so far in this call
         self.llm_max_calls = get_settings().llm_calls_per_call
         self.relists = 0  # times the offered times were repeated because the caller wanted one but didn't say which
@@ -183,6 +190,7 @@ class Receptionist:
         if len(text) > 500:
             text = text[:500]
         text = nlu.fix_mishearings(text)
+        self._asked_again = False
         intents = nlu.detect_intents(text)
         self.intents_seen.extend(i for i in intents if i not in self.intents_seen)
 
@@ -224,6 +232,11 @@ class Receptionist:
                 return self._start_lookup("reschedule")
             if "cancel" in intents and nlu.has(nlu.norm(text), r"\bmy (appointment|booking)\b"):
                 return self._start_lookup("cancel")
+            if self.state in LATE_BOOKING_STATES and self.b.service_id and nlu.wants_time_change(text, self.today):
+                # "Can you make it 4 PM instead?" while giving a name or number: offer times again, keep what's known.
+                self.b.when = nlu.parse_when(text, self.today)
+                self.b.slot = None
+                return self._offer_slots("Sure. ")
         if self.flow == "message" and "book" in intents and self.b.reason != "Urgent concern":
             # The caller was leaving a message but would rather book: do that, keeping what they've already said.
             if self.state == "book_phone_confirm" and nlu.is_affirm(text) and self.b.phone:
@@ -238,6 +251,13 @@ class Receptionist:
             if reply is not None:
                 if self.misunderstood == misses:  # otherwise the handler is asking again, which still counts
                     self.misunderstood = 0
+                elif len(text.split()) >= 5:
+                    # The step is asking again after a long sentence it couldn't use. The optional language helper can
+                    # still tell what was meant (a question, a request for a person) and the step's question returns.
+                    rescued = self._llm_rescue(text)
+                    if rescued is not None:
+                        self.misunderstood = misses + (1 if self._asked_again else 0)
+                        return rescued
                 return reply
             # Side questions mid-flow: answer and return to the pending question.
             side = self._answer_info(text, intents)
@@ -252,7 +272,8 @@ class Receptionist:
         # 3. Top level
         reply = self._top(text, intents)
         if reply is not None:
-            self.misunderstood = 0
+            if not self._asked_again:
+                self.misunderstood = 0
             return reply
         return self._unclear(confidence)
 
@@ -261,6 +282,11 @@ class Receptionist:
         if self.state == "anything_else" and nlu.is_deny(text) and not intents:
             return self._goodbye()
         if "book" in intents:
+            if self.agent is not None and len(text.split()) >= 8:
+                # A long booking sentence often carries the service, day, name and number at once: let the agent pick them up.
+                r = self._agent_decide(text)
+                if r is not None and r.action in ("book", "change_time"):
+                    return self._agent_book(text, r)
             return self._start_booking(text)
         if "reschedule" in intents:
             return self._start_lookup("reschedule")
@@ -278,8 +304,13 @@ class Receptionist:
         if self.state == "anything_else" and nlu.is_affirm(text):
             self.state = "idle"
             return self._say("Sure, what can I help you with?")
-        # The rules didn't understand: optionally ask the LLM what was meant
-        choice = self._llm_choice(text)
+        # The rules didn't understand: ask the agent (or the simpler optional LLM) what was meant
+        if self.agent is not None:
+            r = self._agent_decide(text)
+            reply = self._agent_act(text, r, resume=False) if r is not None else None
+            if reply is not None:
+                return reply
+        choice = None if self.agent is not None else self._llm_choice(text)
         if choice:
             intent, kb_id = choice
             if intent == "book":
@@ -302,6 +333,78 @@ class Receptionist:
                     return self._say(f"{info} Is there anything else I can help with?")
         return None
 
+    # ------------------------------------------------------------------ the agent
+    def _agent_decide(self, text: str):
+        """Ask the agent what an unclear sentence meant. Capped per call (the same cap as the simple LLM), never for
+        one-word sentences, and any failure means "no decision": the rules carry on."""
+        if self.agent is None or self.llm_calls >= self.llm_max_calls or len(text.split()) < 2:
+            return None
+        self.llm_calls += 1
+        known = {"service": bool(self.b.service_id), "day_or_time": self.b.when is not None,
+                 "name": bool(self.b.name or self.caller_name), "phone": bool(self.b.phone or self.caller_phone)}
+        return self.agent.decide(text, {"state": self.state, "asking": self.last_reply, "today": self.today,
+                                        "services": self.snap.services, "kb": self.snap.kb, "known": known})
+
+    def _answer_then(self, info: str, resume: bool) -> Reply:
+        """Say a saved answer, then go back to what was being asked (or offer more help, when nothing was pending)."""
+        if resume:
+            self.misunderstood = 0
+            return self._say(f"{info} {self._reprompt()}")
+        self.state = "anything_else"
+        return self._say(f"{info} Is there anything else I can help with?")
+
+    def _agent_act(self, text: str, r, resume: bool) -> Reply | None:
+        """Carry out the agent's checked decision with the receptionist's own steps and the business's own words."""
+        if r.action == "callback":
+            return self._human()
+        if r.action == "status":
+            return self._booking_status()
+        if r.action == "kb" and r.kb_id:
+            kb = next((k for k in self.snap.kb if k["id"] == r.kb_id), None)
+            return self._answer_then(self._kb_say(kb, text), resume) if kb else None
+        if r.action == "info" and r.info:
+            info = self._answer_info(text, [r.info])
+            return self._answer_then(info, resume) if info else None
+        if r.action == "clarify" and r.say:
+            self.misunderstood += 1  # asking again still counts, so a caller can't be questioned forever
+            self._asked_again = True
+            return self._say(r.say)
+        if r.action in ("book", "change_time"):
+            return self._agent_book(text, r)
+        return None
+
+    def _agent_book(self, text: str, r) -> Reply:
+        """The caller wants to book (or change a time) and may have given details in the same breath."""
+        if r.name:
+            self.caller_name = r.name
+        if r.phone:
+            self.caller_phone, self.phone_confirmed = r.phone, False
+        when = nlu.parse_when(r.when_text, self.today) if r.when_text else None
+        if self.flow == "book" and (self.b.service_id or r.service_id):
+            # A booking is already under way: update it and carry on from the right step.
+            if r.service_id:
+                self.b.service_id = r.service_id
+            if r.email:
+                self.b.email = r.email
+            if when is not None and not when.empty:
+                self.b.when, self.b.slot = when, None
+                return self._offer_slots("Sure. ")
+            if self.state == "book_name" and r.name:
+                self.b.name = r.name
+                return self._ask_phone()
+            if self.state == "book_phone" and r.phone:
+                self.b.phone = r.phone
+                self.state = "book_phone_confirm"
+                return self._say(f"I have {self._phone_readback(r.phone)}. Is that correct?")
+            return self._reprompt_reply()
+        reply = self._start_booking(f"{text} {r.when_text or ''}".strip(), default_service=r.service_id)
+        if r.email:
+            self.b.email = r.email
+        return reply
+
+    def _reprompt_reply(self) -> Reply:
+        return self._say(self._reprompt())
+
     def _llm_choice(self, text: str) -> tuple[str, str | None] | None:
         """Ask the optional LLM what an unclear sentence meant. Capped per call, and skipped for very short sentences,
         so the cost stays small however long the call is."""
@@ -313,6 +416,9 @@ class Receptionist:
     def _llm_rescue(self, text: str) -> Reply | None:
         """A sentence none of the step's rules understood, in the middle of a conversation. The LLM can still tell if
         it was a question we can answer or a request for a person, and we then return to the pending question."""
+        if self.agent is not None:
+            r = self._agent_decide(text)
+            return self._agent_act(text, r, resume=True) if r is not None else None
         choice = self._llm_choice(text)
         if not choice:
             return None
@@ -601,8 +707,11 @@ class Receptionist:
 
     def _ask_phone(self) -> Reply:
         if self.caller_phone and self.b.phone is None:
-            # They already gave and confirmed a number on this call.
             self.b.phone = self.caller_phone
+            if not self.phone_confirmed:
+                # Picked up from a long sentence: read it back before relying on it.
+                self.state = "book_phone_confirm"
+                return self._say(f"I have {self._phone_readback(self.caller_phone)}. Is that correct?")
             return self._confirm_booking()
         if self.caller_number and self.b.phone is None:
             self.state = "book_phone_callerid"
@@ -627,6 +736,12 @@ class Receptionist:
         """Handle one turn of a caller giving their number. People often say it in pieces and pause between groups of
         digits, so it's collected across turns. Returns None if this turn wasn't about the number."""
         said = nlu.phone_digits(text)
+        if self.flow in ("book", "message") and not said:
+            # No phone number to give: an e-mail address will do for a booking or a message.
+            if nlu.extract_email(text):
+                return self._take_email(text)
+            if nlu.says_no_phone(text):
+                return self._ask_email()
         digits = said if nlu.phone_from_digits(said) else self.b.partial_digits + said
         phone = nlu.phone_from_digits(digits)
         if phone:
@@ -644,9 +759,58 @@ class Receptionist:
             return self._say("Sure, go ahead.")
         return None
 
+    # ------------------------------------------------------------------ e-mail instead of a phone number
+    def _ask_email(self) -> Reply:
+        self.b.partial_digits = ""
+        self.state = "book_email"
+        return self._say("No problem. What's the best email address to reach you?")
+
+    @staticmethod
+    def _spoken_email(email: str) -> str:
+        user, domain = email.split("@", 1)
+        spelled = " dot ".join(" ".join(part) for part in user.split("."))  # letters one by one, "dot" as a word
+        return f"{spelled} at {domain.replace('.', ' dot ')}"
+
+    def _take_email(self, text: str) -> Reply | None:
+        email = nlu.extract_email(text)
+        if not email:
+            return None
+        self.b.email = email
+        self.state = "book_email_confirm"
+        return self._say(f"I have {self._spoken_email(email)}. Is that correct?")
+
+    def _after_contact(self) -> Reply:
+        """The caller's way of being reached is settled (a phone number or an e-mail): carry on."""
+        if self.flow == "message":
+            return self._st_msg_finish()
+        return self._confirm_booking()
+
+    def _st_book_email(self, text, intents, conf):
+        reply = self._take_email(text)
+        if reply is not None:
+            return reply
+        if nlu.is_deny(text):  # nothing to give: the booking still goes ahead
+            self.b.email = ""
+            return self._after_contact()
+        return self._retry("Sorry, could you say your email address again?")
+
+    def _st_book_email_confirm(self, text, intents, conf):
+        if nlu.is_affirm(text):
+            return self._after_contact()
+        again = self._take_email(text)
+        if again is not None:
+            return again
+        if nlu.is_deny(text):
+            self.state = "book_email"
+            return self._say("Sorry about that. Could you say the email address again, slowly?")
+        return None
+
+    _st_msg_email = _st_book_email
+
     def _st_book_phone_callerid(self, text, intents, conf):
         if nlu.is_affirm(text):
             self.b.phone = self.caller_phone = self.caller_number
+            self.phone_confirmed = True
             return self._confirm_booking()
         phone = nlu.extract_phone(text)
         if phone:
@@ -669,7 +833,7 @@ class Receptionist:
 
     def _st_book_phone_confirm(self, text, intents, conf):
         if nlu.is_affirm(text):
-            self.caller_phone = self.b.phone
+            self.caller_phone, self.phone_confirmed = self.b.phone, True
             if self.flow == "message":
                 return self._st_msg_finish()
             if self.flow in ("reschedule", "cancel", "check"):
@@ -700,7 +864,8 @@ class Receptionist:
 
     def _st_book_confirm(self, text, intents, conf):
         if nlu.is_affirm(text):
-            res = self.tools.book(self.b.service_id, self.b.slot, self.b.name, self.b.phone)
+            extra = {"email": self.b.email} if self.b.email else {}
+            res = self.tools.book(self.b.service_id, self.b.slot, self.b.name, self.b.phone, **extra)
             if res.ok and res.appointment:
                 # Confirmation only after the backend committed the booking.
                 self.actions.append(f"booked {self._service_name(self.b.service_id)} {self._when_text(res.appointment.start)}")
@@ -955,7 +1120,8 @@ class Receptionist:
         return self._finish_message("Thank you. I've passed your message to our team and someone will call you back.")
 
     def _finish_message(self, spoken: str) -> Reply:
-        self.tools.request_callback(self.b.name or "", self.b.phone, self.b.reason)
+        reason = self.b.reason + (f" Contact email: {self.b.email}." if self.b.email else "")
+        self.tools.request_callback(self.b.name or "", self.b.phone, reason)
         self.actions.append("requested a callback")
         self.outcome_flags.add("callback")
         self.state = "anything_else"
@@ -998,6 +1164,8 @@ class Receptionist:
             "book_name_confirm": "Did I get your name right?",
             "msg_name_confirm": "Did I get your name right?",
             "offer_booking": "Would you like me to try to book a time now?",
+            "book_email": "What's the best email address to reach you?",
+            "book_email_confirm": "Is that email address correct?",
             "book_phone": "What's the best phone number to reach you?",
             "book_phone_callerid": "Is the number you're calling from the best one to reach you?",
             "book_phone_confirm": "Is that number correct?",
@@ -1035,10 +1203,10 @@ class Receptionist:
         spoken = "I'm sorry, I'm having trouble understanding. "
         spoken += "I haven't booked anything yet, so I'll ask our team to call you back." if self.flow == "book" else "I'll ask our team to call you back."
         reason = self._unfinished_request()
-        name, phone = self.b.name or self.caller_name, self.b.phone or self.caller_phone or self.caller_number
+        name, phone, email = self.b.name or self.caller_name, self.b.phone or self.caller_phone or self.caller_number, self.b.email
         self.actions.append("could not be understood")
         self.flow = "message"
-        self.b = Booking(reason=reason, reason_final=True, name=name, phone=phone)
+        self.b = Booking(reason=reason, reason_final=True, name=name, phone=phone, email=email)
         if not name:
             self.state = "msg_name"
             return self._say(f"{spoken} May I have your name?")

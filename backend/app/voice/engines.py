@@ -267,6 +267,25 @@ class _Breaker:
             self._fails, self._until = 0, time.monotonic() + self.cool_s
 
 
+def _temporary(exc: Exception) -> bool:
+    """A failure worth one more try: the network hiccupped, the service had a problem, or it asked us to slow down. A
+    refused key, an empty account or a bad request would fail again, so those aren't retried."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in (408, 425, 429) or exc.response.status_code >= 500
+    return isinstance(exc, httpx.TransportError)
+
+
+def _with_one_retry(call):
+    try:
+        return call()
+    except Exception as exc:
+        if not _temporary(exc):
+            raise
+        log.info("hosted service hiccup (%s); trying once more", type(exc).__name__)
+        time.sleep(0.25)
+        return call()
+
+
 def _terms_from_hint(hint: str) -> list[str]:
     """Business and service names from the recognition hint, for Deepgram's keyterm prompting. The generic hints
     for names and phone numbers carry no terms."""
@@ -276,6 +295,20 @@ def _terms_from_hint(hint: str) -> list[str]:
     return list(dict.fromkeys(t for t in terms if 3 <= len(t) <= 40))[:8]
 
 
+def trim_trailing_silence(audio: np.ndarray, keep_s: float = 0.3, window: int = 160) -> np.ndarray:
+    """Cut the quiet that follows the caller's last word (the turn detector waits 0.65-1.5 s before deciding they are
+    done). Less audio to upload means a quicker answer, and the service bills for audio length."""
+    if audio.size < window * 4:
+        return audio
+    n = audio.size // window
+    rms = np.sqrt(np.mean(audio[: n * window].reshape(n, window) ** 2, axis=1))
+    loud = np.flatnonzero(rms > max(0.006, float(rms.max()) * 0.08))
+    if loud.size == 0:
+        return audio
+    end = min(audio.size, (int(loud[-1]) + 1) * window + int(keep_s * PIPELINE_SR))
+    return audio[:end]
+
+
 class DeepgramASR:
     """Hosted speech recognition (Deepgram Nova-3). Each turn is one request of the caller's audio, about 0.35-0.8 s,
     and its confidence is real: 1.00 on clear speech. Business and service names are sent as key terms, which is
@@ -283,7 +316,7 @@ class DeepgramASR:
 
     URL = "https://api.deepgram.com/v1/listen"
 
-    def __init__(self, api_key: str, fallback=None, timeout: float = 6.0):
+    def __init__(self, api_key: str, fallback=None, timeout: float = 12.0):
         self._key = api_key
         self._fallback = fallback  # callable returning a local ASREngine, or None
         self._http = httpx.Client(timeout=httpx.Timeout(timeout, connect=3.0))  # one connection is kept open between turns
@@ -294,7 +327,7 @@ class DeepgramASR:
         params: list[tuple[str, str]] = [("model", "nova-3"), ("language", "en"), ("smart_format", "true"),
                                          ("encoding", "linear16"), ("sample_rate", str(PIPELINE_SR)), ("channels", "1")]
         params += [("keyterm", t) for t in _terms_from_hint(hints)]
-        r = self._http.post(self.URL, params=params, content=float_to_pcm16(audio16k),
+        r = self._http.post(self.URL, params=params, content=float_to_pcm16(trim_trailing_silence(audio16k)),
                             headers={"Authorization": f"Token {self._key}", "Content-Type": "application/octet-stream"})
         r.raise_for_status()
         alts = r.json()["results"]["channels"][0]["alternatives"]
@@ -305,7 +338,7 @@ class DeepgramASR:
     def transcribe(self, audio16k: np.ndarray, hints: str = "") -> Transcript:
         if not self._breaker.open:
             try:
-                tr = self._remote(audio16k, hints)
+                tr = _with_one_retry(lambda: self._remote(audio16k, hints))
                 self._breaker.ok()
                 return tr
             except Exception as exc:
@@ -425,7 +458,7 @@ class FishTTS:
             raw = None
         if raw is None and not self._breaker.open and len(text) <= self.chars_left():
             try:
-                raw = self._remote(text, speed, ref)
+                raw = _with_one_retry(lambda: self._remote(text, speed, ref))
                 self._breaker.ok()
                 self._spend(len(text))
                 self._cache_dir.mkdir(parents=True, exist_ok=True)
