@@ -111,14 +111,13 @@ export default function VoicesPage() {
     <div>
       <PageHeader
         title="Voices"
-        description="Listen to Fish Audio voices and choose the one that answers your calls. Listening here is free: only the receptionist's replies use your Fish characters."
+        description="Listen to the voices and choose the one that answers your calls. Listening here is free."
         actions={<Link href="/receptionist?tab=voice" className="text-[13px] text-accent hover:underline">Receptionist settings →</Link>}
       />
 
       {ready && !onFish && (
         <div className="mb-4 rounded-lg border border-warning/30 bg-warning-soft px-3 py-2 text-[13px] text-warning">
-          This server isn&apos;t using Fish Audio for the voice (set <code>VR_TTS_ENGINE=fish</code> and a Fish key in the server settings), so a voice chosen here
-          won&apos;t be heard on calls yet.
+          Voice choice isn&apos;t switched on for your account yet, so a voice chosen here won&apos;t be heard on calls. Contact support to turn it on.
         </div>
       )}
 

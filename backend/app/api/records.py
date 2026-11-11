@@ -8,7 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload
 
 from ..config import get_settings
 from ..db import get_db, utcnow
@@ -69,7 +69,7 @@ def _contact(db: Session, ctx: TenantContext, cid: str) -> Contact:
 def get_contact(cid: str, ctx: TenantContext = Depends(require_tenant), db: Session = Depends(get_db)):
     c = _contact(db, ctx, cid)
     appts = db.scalars(select(Appointment).where(Appointment.tenant_id == ctx.tenant_id, Appointment.contact_id == c.id)
-                       .options(selectinload(Appointment.service), selectinload(Appointment.staff), selectinload(Appointment.contact))
+                       .options(joinedload(Appointment.service), joinedload(Appointment.staff), joinedload(Appointment.contact))
                        .order_by(Appointment.start_at.desc())).all()
     calls = db.scalars(select(Call).where(Call.tenant_id == ctx.tenant_id, Call.contact_id == c.id).order_by(Call.started_at.desc()).limit(50)).all()
     return {**contact_out(c), "appointments": [appointment_out(a, ctx.tenant) for a in appts], "calls": [call_out(x) for x in calls]}
@@ -208,28 +208,30 @@ def overview(ctx: TenantContext = Depends(require_tenant), db: Session = Depends
     def count(stmt):
         return db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
 
-    calls_today = count(select(Call.id).where(Call.tenant_id == tid, Call.started_at >= day_start, Call.started_at < day_end))
     booked_today = count(select(Appointment.id).where(Appointment.tenant_id == tid, Appointment.created_at >= day_start,
                                                        Appointment.created_at < day_end))
     ai_booked_7d = count(select(Appointment.id).where(Appointment.tenant_id == tid, Appointment.source == "ai_call",
                                                        Appointment.created_at >= day_start - timedelta(days=6)))
     attention = db.scalars(select(Call).where(Call.tenant_id == tid, Call.follow_up_status == "needed").order_by(Call.started_at.desc()).limit(5)).all()
-    attention_count = count(select(Call.id).where(Call.tenant_id == tid, Call.follow_up_status == "needed"))
+    attention_count = len(attention) if len(attention) < 5 else count(select(Call.id).where(Call.tenant_id == tid, Call.follow_up_status == "needed"))
     upcoming = db.scalars(select(Appointment).where(Appointment.tenant_id == tid, Appointment.start_at >= utcnow(),
                                                     Appointment.status.in_(("pending", "confirmed")))
-                          .options(selectinload(Appointment.contact), selectinload(Appointment.service), selectinload(Appointment.staff))
+                          .options(joinedload(Appointment.contact), joinedload(Appointment.service), joinedload(Appointment.staff))
                           .order_by(Appointment.start_at).limit(6)).all()
     upcoming_today = count(select(Appointment.id).where(Appointment.tenant_id == tid, Appointment.start_at >= day_start,
                                                          Appointment.start_at < day_end, Appointment.status.in_(("pending", "confirmed"))))
     recent = db.scalars(select(Notification).where(Notification.tenant_id == tid, Notification.user_id == ctx.user.id)
                         .order_by(Notification.created_at.desc()).limit(8)).all()
-    # 7-day call volume for the compact chart
-    series = []
-    for i in range(6, -1, -1):
-        d = today - timedelta(days=i)
-        s = local_to_utc(d, datetime.min.time(), tz) or day_start
-        series.append({"date": d.isoformat(), "calls": count(select(Call.id).where(Call.tenant_id == tid, Call.started_at >= s,
-                                                                                     Call.started_at < s + timedelta(days=1)))})
+    # 7-day call volume for the compact chart: one query, grouped by local day here
+    days = [today - timedelta(days=i) for i in range(6, -1, -1)]
+    first = local_to_utc(days[0], datetime.min.time(), tz) or day_start
+    per_day = {d: 0 for d in days}
+    for (started,) in db.execute(select(Call.started_at).where(Call.tenant_id == tid, Call.started_at >= first, Call.started_at < day_end)):
+        local_day = started.astimezone(tz).date()
+        if local_day in per_day:
+            per_day[local_day] += 1
+    series = [{"date": d.isoformat(), "calls": per_day[d]} for d in days]
+    calls_today = per_day[today]
     tel = db.scalar(select(TelephonyIntegration).where(TelephonyIntegration.tenant_id == tid))
     return {
         "is_demo_tenant": ctx.tenant.is_demo,

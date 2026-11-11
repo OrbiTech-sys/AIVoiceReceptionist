@@ -1,6 +1,6 @@
 # OrbiTech AI Receptionist
 
-Multi-tenant AI voice receptionist SaaS: answers calls, answers business questions, books / reschedules / cancels appointments, and notifies the owner. Speech recognition, voice activity detection and speech synthesis run **locally on open-source models** — no paid AI APIs and no API keys.
+Multi-tenant AI voice receptionist SaaS: answers calls, answers business questions, books / reschedules / cancels appointments, and notifies the owner. Speech recognition, voice activity detection and speech synthesis can run **locally on open-source models** with no API keys, or use the hosted services **Deepgram** (hearing), **Groq** (understanding unclear sentences) and **Fish Audio** (voice) when their keys are set (see *Hosted services*). Hosted services send callers' audio or words to those companies: disclose that to your clients.
 
 **Stack:** Next.js 16 + React 19 + TypeScript + Tailwind (PWA) · FastAPI · SQLAlchemy/Alembic · PostgreSQL (SQLite for quick local dev) · faster-whisper or NVIDIA Parakeet (speech recognition) · Silero VAD · Kokoro-82M or Piper (voice) · Asterisk (AudioSocket) for live phone calls · Web Push (VAPID).
 
@@ -41,7 +41,7 @@ Both are settings in `.env`; download the model from *Platform admin* (or with `
 - Because the server fetches the address you type, it only connects to public sites on ports 80/443, re-checks every redirect, and refuses localhost, private and cloud-metadata addresses. (The address is checked just before connecting, so a hostile DNS server that changes its answer in between is not covered; run the API without access to internal networks if that matters.)
 - Importing again skips passages that are already saved. Limits: PDF 5 MB / 40 pages, web page 1.5 MB.
 
-Ready-made starting points live in `knowledge-templates/`: `doctor-office.csv` has 34 safe answers for a doctor's office (what to bring, insurance and referrals, refills, test results, records, forms, billing, privacy, emergencies and crisis lines, no medical advice). It states no prices, hours, plans or phone numbers, because only the practice knows those: add them as your own entries (or in *Business Settings*). Import it with *Import PDF/CSV/TXT*, then edit.
+Ready-made starting points live in `knowledge-templates/`: `doctor-office.csv` (and the same content as `doctor-office.pdf`) has 33 safe answers for a doctor's office (what to bring, insurance and referrals, refills, test results, records, forms, billing, privacy, emergencies and crisis lines, no medical advice). It states no prices, hours, plans or phone numbers, because only the practice knows those: add them as your own entries (or in *Business Settings*). Import it with *Import PDF/CSV/TXT*, then edit.
 
 ### Hosted services (optional)
 Put `DEEPGRAM_API_KEY`, `GROQ_API_KEY` and/or `FISH_AUDIO_API_KEY` in `.env`. Each is used only when its key is set, and each falls back to the local models if the service fails (after two failures it is left alone for 30 s, so callers never wait on timeouts).
@@ -53,6 +53,15 @@ Put `DEEPGRAM_API_KEY`, `GROQ_API_KEY` and/or `FISH_AUDIO_API_KEY` in `.env`. Ea
 | Fish Audio (`VR_TTS_ENGINE=fish`) | the receptionist's voice | 1.7 s a sentence here, slower than local Piper (0.4 s) | free plan is 10,000 characters a month: each phrase is paid for once and kept on disk, and above `VR_FISH_MONTHLY_CHARS` (9,000) the local voice speaks. Off by default; with the free plan that is about 150 replies a month |
 
 **Privacy:** with these on, the caller's audio goes to Deepgram, the words of unclear sentences to Groq, and replies to Fish Audio. Describe that in your privacy policy, and for medical or dental clients check whether a signed agreement (BAA) is needed before using them. `VR_ASR_PROVIDER=local` and `VR_LLM_PROVIDER=local` keep hearing and understanding on your machine even when keys are set.
+
+### The agent (LangGraph + Groq)
+With a `GROQ_API_KEY` set, a small **LangGraph agent** (`backend/app/voice/agent.py`) handles the sentences the receptionist's rules can't place, and long booking sentences that carry several details at once ("a dental cleaning next Tuesday afternoon, I'm Abdul Basit, 212 787 4128"). The graph is `route` (one model call that answers in JSON) → `guard` (checks everything against the business's own data) with one automatic repair attempt if the JSON is unusable.
+
+- **It routes, it never writes.** The model picks which saved answer fits (paraphrases such as "where can I leave my car" find "Where can I park?"), whether the caller wants a person, a new time, a booking, and which details they already gave. What is *said* always comes from the business's own saved text, so it cannot invent prices, hours or advice.
+- **The guard** drops anything it can't verify: an answer id that isn't saved, a name that isn't a name, a phone number that isn't one, a day it can't read, or a question containing numbers or links. A number picked up from a long sentence is read back before it is used.
+- **Safe and cheap:** ordinary turns never reach the model (the rules answer in about 20 ms); it is asked only when the rules fail or for long booking sentences, at most `VR_LLM_CALLS_PER_CALL` (6) times per call; a model error just means the rules carry on. Measured on Groq `qwen/qwen3.8-27b`: 8 of 8 test routings right, about 250-450 ms per call (the first call of a session about 1 s).
+- Callers' words reach the model only as data, in a fixed system prompt that says to ignore instructions inside them, and the model can't call any tool: every action goes through the receptionist's normal validated steps.
+- Off with `VR_AGENT_MODE=off`. It adds about 50 MB of Python packages (`langgraph`, `langchain-groq`, pinned in `requirements.txt`).
 
 ## Settings (`.env`)
 
@@ -100,7 +109,7 @@ To turn it off again, remove both lines from `.env`, run `docker compose rm -sf 
 | In-app notifications, sounds, custom sound upload | Optional LLM classifier: opt-in `llm` compose profile (llama.cpp, ~2 GB more RAM) |
 
 ### Cost transparency
-1. **Software / AI inference:** free. MIT/Apache models, no per-call fees.
+1. **Software / AI inference:** free when run locally (MIT/Apache models, no per-call fees). The hosted services have free tiers with limits (Fish Audio: 10,000 characters a month; check Deepgram's and Groq's current limits) and bill per use beyond them.
 2. **Hosting / hardware:** you pay for a server. CPU-only is fine for the demo; measured here (8 threads, no GPU): Whisper base.en transcribes a 3 s utterance in ~1 s; Kokoro synthesizes at ~0.6× real time, first audio ≈ 1–3 s. Concurrent live calls need more cores.
 3. **Telephony:** a phone number, SIP trunk and call minutes are paid by you to your provider. Entering a number in the UI does **not** connect it; you must configure SIP/forwarding. Forwarding from an existing number is set up with your carrier (options and costs vary); porting takes days.
 4. **Optional:** SMTP, SMS (not implemented), hosting domain/TLS.
@@ -115,6 +124,11 @@ To turn it off again, remove both lines from `.env`, run `docker compose rm -sf 
 - **`kokoro-onnx` phonemizes through espeak-ng (GPL-3.0)** via `phonemizer`/`espeakng-loader`. If you distribute the software, review GPL obligations (or swap in a different phonemizer/TTS). Hosting it as a service has different obligations than distributing it — get advice.
 - Asterisk is GPL-2.0 and runs as a separate process.
 - `soxr` (audio resampling) is LGPL-2.1-or-later, used as an unmodified library.
+
+## Security checks
+Run on 2026-11-12 (automated, plus a manual review of the code): `backend/tests/test_security.py` sweeps **every endpoint**: each protected one must answer 401 without a login and 403 without the CSRF token, the list of endpoints open to the public is fixed (a new one fails the test until it is reviewed), and the live-call websocket must refuse visitors without a login and requests from other sites. The website sends a Content-Security-Policy (scripts, styles, images, media and connections only from this site, Fish Audio's sample clips, and `wss:`; no framing, plug-ins or off-site forms), `X-Frame-Options`, HSTS in production and a strict Permissions-Policy; API answers carry `default-src 'none'`. A policy test in a real browser showed an injected script from another site and a data-sending request being blocked. `npm audit` and `pip-audit` found no known vulnerabilities in the dependencies. Server-side requests the user can trigger (the website importer) only reach public sites. In Docker the API and website listen on the machine's own address only, so only nginx reaches them, and the real visitor address is used for rate limits.
+
+Known limits, so nobody is surprised: the CSP allows inline scripts (Next.js writes its page data inline; removing that needs per-request nonces and gives up static pages); the rate limiter lives in one process and the sign-in limit per e-mail lets someone lock a known account out for five minutes; sign-up reveals whether an e-mail is registered; the phone line's token travels in the query string of the Asterisk request (keep that traffic on a private network or behind TLS); and nobody has penetration-tested this. Before real clients: keep dependencies updated (`npm audit`, `pip-audit`), run HTTPS only, keep `VR_ENV=production`, and have a security professional test it.
 
 ## Security & privacy
 Argon2id passwords, server-side sessions in HttpOnly cookies, CSRF header on mutations, per-route rate limits, tenant id always taken from the server session and membership (never from the browser), tenant-scoped queries, Fernet-encrypted secrets, magic-byte audio upload validation, origin checks on WebSockets, audit events, retention purge job, call recording **off by default** (requires a consent message). Callers' speech is data only: the conversation engine can only invoke validated backend tools. In production you must provide HTTPS, `VR_ENV=production`, a strong `VR_SECRET_KEY`, `VR_COOKIE_SECURE=true`, PostgreSQL backups (`pg_dump` nightly; restore with `psql`) and monitoring (`/api/health`). You are responsible for call-recording, privacy and AI-disclosure law compliance; a checkbox does not make you compliant.

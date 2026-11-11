@@ -72,7 +72,7 @@ def test_deepgram_failure_uses_the_local_model_and_a_failing_service_is_left_alo
     asr._http = _client(handler)
     for _ in range(4):
         assert asr.transcribe(AUDIO).text == "from the local model"
-    assert calls["n"] == 2 and local.calls == 4  # after two failures, no more waiting on the broken service
+    assert calls["n"] == 4 and local.calls == 4  # two failed turns (each tried twice), then no more waiting on the broken service
 
 
 def test_deepgram_without_a_local_model_reports_the_problem_instead_of_guessing():

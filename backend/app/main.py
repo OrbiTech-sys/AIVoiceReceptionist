@@ -87,8 +87,15 @@ def create_app() -> FastAPI:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-        if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
-            response.headers["Cache-Control"] = "no-store"
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if get_settings().env == "production":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+        if request.url.path.startswith("/api/"):
+            if "cache-control" not in response.headers:
+                response.headers["Cache-Control"] = "no-store"
+            # API answers are data, never pages: if one were ever opened in a browser it may load nothing at all.
+            if not request.url.path.startswith(("/api/docs", "/api/openapi")):
+                response.headers.setdefault("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
         return response
 
     for r in (auth, business, catalog, appointments, records, notifications, receptionist, telephony, system):

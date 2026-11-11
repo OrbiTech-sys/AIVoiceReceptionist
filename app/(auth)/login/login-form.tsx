@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { Button, Field, Input } from "@/components/ui";
 import { api, errorMessage } from "@/lib/api";
+import { isSafePath } from "@/lib/safe-path";
 import type { Me } from "@/lib/types";
 
 export function LoginForm() {
@@ -22,7 +23,8 @@ export function LoginForm() {
     try {
       const me = await api<Me>("/api/auth/login", { body: { email, password } });
       const next = new URLSearchParams(window.location.search).get("next");
-      const safeNext = next && next.startsWith("/") && !next.startsWith("//") ? next : "/overview";
+      // Only a path on this site is followed (see lib/safe-path.ts).
+      const safeNext = next && isSafePath(next) ? next : "/overview";
       router.replace(me.tenant && !me.tenant.onboarding_completed && me.role === "owner" ? "/onboarding" : safeNext);
     } catch (err) {
       setError(errorMessage(err));

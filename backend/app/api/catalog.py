@@ -270,8 +270,8 @@ async def import_kb(file: UploadFile = File(...), ctx: TenantContext = Depends(r
             raise AppError("That PDF is too large (max 5 MB).", code="file_too_large")
         if not raw.startswith(b"%PDF-"):
             raise AppError("That file isn't a PDF.", code="invalid_file")
-        entries = await asyncio.get_running_loop().run_in_executor(None, knowledge_import.import_pdf, raw)
-        return _save_passages(db, ctx.tenant_id, entries)
+        entries, ignored = await asyncio.get_running_loop().run_in_executor(None, knowledge_import.import_pdf, raw)
+        return {**_save_passages(db, ctx.tenant_id, entries), "ignored": ignored}
     raw = await file.read(MAX_IMPORT_BYTES + 1)
     pairs = parse_knowledge_file(file.filename or "", raw)
     for q, a in pairs:

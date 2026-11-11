@@ -101,7 +101,7 @@ def _pdf(text_lines: list[str]) -> bytes:
 
 def test_a_pdf_becomes_passages():
     data = _pdf(["New Patient Guide", "Please arrive ten minutes early and bring your insurance card.", "We take Delta Dental and Cigna."])
-    entries = ki.import_pdf(data)
+    entries, _ = ki.import_pdf(data)
     assert any("insurance card" in a and "Delta Dental" in a for _, a in entries)
 
 

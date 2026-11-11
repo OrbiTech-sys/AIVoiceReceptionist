@@ -53,13 +53,24 @@ export default function PrivacyPage() {
 
           <h2>Speech processing</h2>
           <p>
-            Speech recognition and speech synthesis run on our own server using open-source models. Caller audio isn’t sent to a paid AI
-            service for processing.
+            To answer a call, we use online speech services that process information on our behalf, each under its own terms and privacy
+            policy:
+          </p>
+          <ul className="mk-note-list">
+            <li>Deepgram turns what a caller says into text, so the audio of the caller’s speech is sent to Deepgram.</li>
+            <li>Groq helps understand a sentence our own rules could not, so the text of that sentence is sent to Groq. This is only done
+              for sentences that need it.</li>
+            <li>Fish Audio turns the receptionist’s replies into speech, so the text of each reply is sent to Fish Audio.</li>
+          </ul>
+          <p>
+            Which of these are used depends on how the service is set up for you. Voice detection runs on our own server. We don’t
+            use callers’ audio or words for advertising.
           </p>
 
           <h2>Who else handles information</h2>
           <ul className="mk-note-list">
             <li>The phone provider a business connects carries its calls and has its own privacy terms.</li>
+            <li>Our database provider stores the service’s data on our behalf.</li>
             <li>Browser push services deliver push notifications to the devices you allow.</li>
             <li>If e-mail delivery is enabled, an e-mail provider delivers alerts and replies.</li>
             <li>We may disclose information when the law requires it.</li>

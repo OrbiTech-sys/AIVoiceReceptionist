@@ -89,19 +89,19 @@ export function PhoneSetup() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <Badge tone={statusTone(data.status)} dot>{STATUS_LABEL[data.status] ?? data.status}</Badge>
-        <span className="text-[13px] text-muted">
-          AudioSocket listener: {data.listener.listening ? `running on port ${data.listener.port}` : `not running${data.listener.error ? ` — ${data.listener.error}` : ""}`}
-        </span>
+        {!data.listener.listening && (
+          <span className="text-[13px] text-warning">Phone calls can&apos;t reach the receptionist right now. Please contact support.</span>
+        )}
       </div>
       {data.last_error && data.status !== "connected" && <p className="text-[13px] text-warning">{data.last_error}</p>}
 
       <div className="rounded-lg border border-border bg-surface-2/50 p-4 text-[13px] leading-relaxed text-muted">
         <p className="font-medium text-text">How live calls reach your receptionist</p>
         <ol className="mt-2 list-decimal space-y-1 pl-5">
-          <li>Get a phone number (DID) and SIP trunk from any SIP provider. This is a paid service: expect a monthly number fee plus per-minute charges.</li>
-          <li>Run Asterisk (open source) on your server — it is included in the Docker Compose setup. Asterisk answers the SIP call and streams audio to this app.</li>
-          <li>Either give customers the new number, or turn on <span className="font-medium text-text">call forwarding</span> from your existing number to it. Forwarding is configured with your current phone carrier; options, codes and costs differ by carrier. Moving (porting) your existing number to the SIP provider is also possible but takes days and is handled by the providers.</li>
-          <li>Save the details below, load the generated Asterisk configuration, and make a test call. The status only shows <span className="font-medium text-text">Connected</span> after a real call reaches the receptionist.</li>
+          <li>Get a phone number from a phone provider (SIP). This is a paid service: expect a monthly number fee plus per-minute charges.</li>
+          <li>Our team connects that number to your receptionist. Send them the details below, or enter them yourself if you know them.</li>
+          <li>Either give customers the new number, or turn on <span className="font-medium text-text">call forwarding</span> from your existing number to it. Forwarding is set up with your current phone carrier; options and costs differ by carrier.</li>
+          <li>Save the details below and make a test call. The status only shows <span className="font-medium text-text">Connected</span> after a real call reaches the receptionist.</li>
         </ol>
       </div>
 

@@ -60,12 +60,12 @@ export function SiteFooter() {
               {l.label}
             </Link>
           ))}
-          <Link href="/signup">Create account</Link>
+          <Link href="/signup">Sign up</Link>
           <Link href="/login">Sign in</Link>
           <Link href="/privacy">Privacy</Link>
           <Link href="/terms">Terms</Link>
         </nav>
-        <p className="mk-foot__legal">© {COMPANY_NAME}. Speech runs on open-source models: Whisper, Silero VAD and Kokoro.</p>
+        <p className="mk-foot__legal">© {COMPANY_NAME}</p>
       </div>
     </footer>
   );

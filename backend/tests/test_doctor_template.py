@@ -60,3 +60,12 @@ def test_emergencies_are_never_left_to_the_knowledge_base(pairs, said):
     reply = r.handle(said).text
     assert "urgent" in " ".join(r.outcome_flags) or "emergency" in reply.lower() or "911" in reply
     assert "urgent" in r.outcome_flags  # the team is alerted too
+
+
+def test_the_pdf_version_imports_the_same_questions_and_answers(pairs):
+    from app.services import knowledge_import
+
+    got, ignored = knowledge_import.import_pdf(FILE.with_suffix(".pdf").read_bytes())
+    assert ignored == 0  # nothing in our own file is left out
+    norm = lambda t: " ".join(t.split())
+    assert {(norm(q), norm(a)) for q, a in got} == {(norm(q), norm(a)) for q, a in pairs}

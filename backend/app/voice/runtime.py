@@ -234,6 +234,12 @@ def prewarm_phrases() -> int:
 
 
 def startup_warmup() -> None:
+    try:
+        from .agent import get_agent
+
+        get_agent()  # imports the LangChain packages now, not during the first call
+    except Exception:
+        log.exception("agent warm-up failed")
     warmup()
     try:
         n = prewarm_phrases()
@@ -247,6 +253,21 @@ def voice_ready() -> bool:
     over the network, so it is cheap enough to check on every incoming call."""
     return ((use_deepgram() or mm.installed_asr() is not None) and "asr" not in _errors
             and active_tts_id() is not None and "tts" not in _errors)
+
+
+def fish_chars_left() -> int | None:
+    """Fish Audio characters left this month under the cap, or None when Fish isn't the voice."""
+    if not use_fish():
+        return None
+    import json
+
+    s = get_settings()
+    try:
+        data = json.loads((s.data_dir / "fish_usage.json").read_text())
+        used = int(data["chars"]) if data.get("month") == time.strftime("%Y-%m") else 0
+    except Exception:
+        used = 0
+    return max(0, s.fish_monthly_chars - used)
 
 
 def readiness() -> dict:
@@ -265,7 +286,7 @@ def readiness() -> dict:
     return {
         "asr": {"ready": asr_ready, "model": asr_mid, "error": _errors.get("asr", ""), "latency_ms": _latency.get("asr")},
         "tts": {"ready": tts_ready, "model": tts_mid, "error": _errors.get("tts", ""),
-                "latency_ms": _latency.get("tts")},
+                "latency_ms": _latency.get("tts"), "chars_left": fish_chars_left(), "chars_cap": get_settings().fish_monthly_chars if use_fish() else None},
         "vad": {"ready": True, "model": vad_kind},
         "llm": llm_status(),
         "voice_ready": asr_ready and tts_ready,

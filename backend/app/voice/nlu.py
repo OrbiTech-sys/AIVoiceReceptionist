@@ -126,6 +126,12 @@ def detect_intents(text: str) -> list[str]:
         found = [f for f in found if f not in ("book", "check_appointment")]
     if "book" in found and "hours" in found and not has(t, r"\bhours\b", r"what time do you", r"are you open"):
         found.remove("hours")
+    # "Is she available right now?" asks about a person, not about appointment times.
+    if "book" in found and has(t, r"\b(is|are|was) (she|he|they|the doctor|dr \w+|doctor \w+|the dentist|anyone|someone|somebody)( \w+){0,2} (available|in|free|there|around|in the office)\b",
+                               r"\bavailable (right )?now to (talk|speak)\b") and has(t, r"\b(right now|now|at the moment|currently|talk|speak)\b"):
+        found = [f for f in found if f != "book"]
+        if "human" not in found:
+            found.append("human")
     return found
 
 
@@ -389,6 +395,7 @@ def extract_phone(text: str) -> str | None:
 
 
 NAME_PREFIX = re.compile(r"\b(?:my name is|my name's|name is|this is|it's|it is|i am|i'm|call me|the name is|under)\s+(.+)", re.I)
+NAME_PREFIX_ONLY = re.compile(r"\b(?:my name is|my name's|name is|this is|it's|it is|i am|i'm|call me|the name is|under)\s+", re.I)
 NOT_NAMES = {"yes", "no", "okay", "ok", "sure", "hello", "hi", "hey", "um", "uh", "the", "a", "and", "calling", "looking",
              "trying", "wondering", "interested", "here", "fine", "good", "great", "sorry", "just", "first", "second", "third",
              "last", "one", "two", "three", "option", "that", "this", "next", "tuesday", "monday", "wednesday", "thursday",
@@ -397,21 +404,66 @@ NOT_NAMES = {"yes", "no", "okay", "ok", "sure", "hello", "hi", "hey", "um", "uh"
              "called", "actually", "speaking", "well", "of", "its"}
 
 
+# Words that show a sentence, not a name: nobody is called "Said", "Make" or "Time".
+NOT_NAME_WORDS = {"said", "say", "set", "make", "made", "time", "appointment", "book", "booking", "change", "please", "instead",
+                  "doctor", "email", "phone", "number", "want", "wanted", "need", "like", "would", "could", "can", "you", "me",
+                  "my", "your", "talk", "speak", "call", "tomorrow", "today", "cleaning", "consultation", "available", "about",
+                  "how", "what", "when", "where", "why", "gmail", "yahoo", "outlook", "hotmail", "com", "dot", "at"}
+
+
 def extract_name(text: str, expecting: bool = False) -> str | None:
     raw = text.strip().strip(".!?, ")
-    m = NAME_PREFIX.search(raw)
-    cand = m.group(1) if m else (raw if expecting else None)
-    if not cand:
+    if "@" in raw or re.search(r"\d", raw) or re.search(r"\b(dot com|at gmail|at yahoo|at outlook)\b", raw, re.I):
+        return None  # an e-mail address or a number, not a name
+    starts = list(NAME_PREFIX_ONLY.finditer(raw))
+    if starts:
+        cands = [raw[starts[-1].end():]]  # "My name is not set. My name is Abar": the last one is the correction
+    elif expecting and len(raw.split()) <= 5:
+        # a bare answer such as "Yeah. It's, Mohammed Subhan": the name is the last piece that is one
+        cands = [c for c in reversed(re.split(r"[,.!?]", raw)) if c.strip()]
+    else:
         return None
-    cand = re.split(r"[,.!?]| and | my | i | phone | number ", cand, maxsplit=1)[0]
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]*", cand)][:4]
-    while words and words[0].lower() in NOT_NAMES | {"mr", "mrs", "ms", "miss", "dr"}:
-        words.pop(0)
-    if not words or words[0].lower() in NOT_NAMES or len(words) > 4:
-        return None
-    if any(w.lower() in ("appointment", "book", "cleaning", "tomorrow", "today", "please") for w in words):
-        return None
-    return " ".join(w[:1].upper() + w[1:].lower() if w.islower() or w.isupper() else w for w in words)
+    for cand in cands:
+        cand = re.split(r"[,.!?]| and | my | i | phone | number ", cand, maxsplit=1)[0]
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]*", cand)][:4]
+        while words and words[0].lower() in NOT_NAMES | {"mr", "mrs", "ms", "miss", "dr"}:
+            words.pop(0)
+        if not words or words[0].lower() in NOT_NAMES or len(words) > 4:
+            continue
+        if any(w.lower() in NOT_NAME_WORDS for w in words):
+            continue
+        return " ".join(w[:1].upper() + w[1:].lower() if w.islower() or w.isupper() else w for w in words)
+    return None
+
+
+# ------------------------------------------------------------------ e-mail, and changing a time that was just chosen
+EMAIL = re.compile(r"[a-z0-9][a-z0-9._%+-]*@[a-z0-9-]+(?:\.[a-z0-9-]+)+", re.I)
+
+
+def extract_email(text: str) -> str | None:
+    """An e-mail address, whether it arrives as "nova@gmail.com" or spoken as "nova at gmail dot com"."""
+    t = text.lower().strip()
+    t = re.sub(r"\s+at\s+(?=[a-z0-9-]+\s+dot\s+)", "@", t)
+    t = re.sub(r"\s+dot\s+", ".", t)
+    t = re.sub(r"\s*@\s*", "@", t)
+    m = EMAIL.search(t)
+    return m.group(0).rstrip(".") if m else None
+
+
+def says_no_phone(text: str) -> bool:
+    """The caller has no phone number to give, or would rather give an e-mail address."""
+    t = norm(text)
+    return has(t, r"\b(don't|do not|dont|no) (have )?(a |any )?(phone|mobile|cell|number)\b", r"\bno phone\b",
+               r"\bwithout a (phone|number)\b", r"\be ?mail\b")
+
+
+CHANGE_TIME = (r"\b(make it|instead|change (the |my )?(time|day|date|appointment)|move (it|the appointment)|can we (do|make)|"
+               r"how about|rather|switch|different time|appointment time|from \S+ to \S+)\b")
+
+
+def wants_time_change(text: str, today: date) -> bool:
+    """While a booking is being completed, the caller asks for another time: "Can you make it 4 PM instead?"."""
+    return has(norm(text), CHANGE_TIME) and not parse_when(text, today).empty
 
 
 # ------------------------------------------------------------------ fuzzy matching (services, KB)
