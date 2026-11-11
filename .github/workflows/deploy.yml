@@ -13,6 +13,13 @@ name: Deploy to AWS
 #                never changed this way. Copy each value exactly as it is written in your local .env.
 #                After editing this secret, start the workflow again (Actions -> Deploy to AWS -> Run workflow).
 #
+# Variables can also live in AWS Systems Manager Parameter Store, edited in the AWS console, so they never touch GitHub:
+#   - one parameter per variable under /voicerep/ (type SecureString), e.g. /voicerep/GROQ_API_KEY
+#   - the EC2 instance needs an IAM role that may read them (ssm:GetParametersByPath on /voicerep and /voicerep/*)
+#   Every deploy reads them (deploy/fetch-ssm-env.sh) and merges them like SERVER_ENV; where both define the same
+#   name, Parameter Store wins. If the server cannot read Parameter Store the deploy still goes ahead and the log
+#   says "parameter-store: not available (<AWS error code>)".
+#
 # The runner needs to reach port 22 of the server; GitHub's runner IPs change, so the security group
 # must allow SSH from the internet for this to work.
 on:
@@ -31,6 +38,8 @@ concurrency:
 env:
   APP_DIR: AIVoiceReceptionist # folder in the SSH user's home directory on the server
   HEALTH_URL: https://voice.theorbitechsolution.com/api/health
+  AWS_REGION: ap-southeast-2 # region of the server and of its Parameter Store (Sydney)
+  SSM_PATH: /voicerep/ # Parameter Store path holding the app's variables
 
 jobs:
   deploy:
@@ -78,11 +87,21 @@ jobs:
             ssh "${ssh_opts[@]}" "$target" 'rm -f "$HOME/.voicerep-env.overrides"'
           fi
 
-          ssh "${ssh_opts[@]}" "$target" "APP_DIR=$APP_DIR bash -s" <<'REMOTE'
+          ssh "${ssh_opts[@]}" "$target" "APP_DIR=$APP_DIR AWS_REGION=$AWS_REGION SSM_PATH=$SSM_PATH bash -s" <<'REMOTE'
           set -euo pipefail
-          trap 'rm -f "$HOME/.voicerep-env.overrides"' EXIT
+          trap 'rm -f "$HOME/.voicerep-env.overrides" "$HOME/.voicerep-ssm.err"' EXIT
           cd "$HOME/$APP_DIR"
           git pull --ff-only origin main
+          # Variables kept in AWS Parameter Store are added after the SERVER_ENV ones, so they win. Not being able to
+          # read them (no instance role yet, say) never stops a deploy; only a short status line is printed, never a value.
+          if ssm_lines=$(bash deploy/fetch-ssm-env.sh "$SSM_PATH" 2> "$HOME/.voicerep-ssm.err"); then
+            if [ -n "$ssm_lines" ]; then ( umask 077; printf '%s\n' "$ssm_lines" >> "$HOME/.voicerep-env.overrides" ); fi
+            echo "parameter-store: $(printf '%s' "$ssm_lines" | grep -c . || true) parameter(s) read from $SSM_PATH"
+          else
+            code=$(grep -o 'An error occurred ([A-Za-z0-9]*)' "$HOME/.voicerep-ssm.err" | head -n 1 | sed 's/.*(\(.*\))/\1/' || true)
+            echo "parameter-store: not available (${code:-unknown error})"
+          fi
+          unset ssm_lines
           # Merge the extra variables (if any) into .env. The previous .env is kept as ~/.voicerep-env.bak.
           bash deploy/merge-env.sh "$HOME/.voicerep-env.overrides" .env "$HOME/.voicerep-env.bak"
           rm -f "$HOME/.voicerep-env.overrides"
